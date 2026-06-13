@@ -1,6 +1,6 @@
-# Automat Workflows MCP Server
+# Robotic Workflows MCP Server
 
-A remote [MCP](https://modelcontextprotocol.io/) server that lets AI agents build, run, and manage Automat RPA workflows — the same operations humans perform in the studio.
+A remote [MCP](https://modelcontextprotocol.io/) server that lets AI agents build, run, and manage RPA workflows, powered by Automat AI (https://runautomat.com/).
 
 The server is a thin forwarder: each tool calls the studio app's keyless agent API (`/api/agent/*`), which resolves the project from the API key and reuses studio's existing validation, versioning, and execution code.
 
