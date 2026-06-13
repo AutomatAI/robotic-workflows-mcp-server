@@ -11,8 +11,8 @@ import { z } from "zod";
  * They are NOT yet wired to studio — once the studio "thin client" (API-key-authed,
  * single-project-scoped endpoints) is ready, each handler forwards to it.
  *
- * The authoritative contract for the thin client lives in `docs/MCP_TOOLS_SPEC.md`.
- * Point your agent at this repo: the spec + these schemas fully describe what the
+ * The authoritative contract for the thin client lives in `README.md` (Tools section).
+ * Point your agent at this repo: the README + these schemas fully describe what the
  * thin client must expose.
  */
 
