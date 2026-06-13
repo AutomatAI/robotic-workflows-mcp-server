@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 
@@ -13,27 +14,21 @@ import { z } from "zod";
  */
 
 // ---------------------------------------------------------------------------
-// Inbound auth — the key MCP clients use to reach THIS server.
+// Config + per-request auth.
 // ---------------------------------------------------------------------------
-// Set via the Vercel env. This server now proxies REAL workflow mutations, so the
-// inbound key must NOT be hardcoded/committed — keep it an env-only secret and
-// rotate the old throwaway value.
-const MCP_API_KEY = process.env.MCP_API_KEY ?? "";
-
-// ---------------------------------------------------------------------------
-// Outbound — the studio v1 API this server forwards to.
-// ---------------------------------------------------------------------------
-// ⚠️ STUDIO_API_BASE_URL must point at the v1 API origin. Vercel PREVIEW URLs
-//    change per deploy — set this (and STUDIO_API_KEY) in the Vercel env rather
-//    than relying on the defaults below. Protected previews also need
-//    VERCEL_AUTOMATION_BYPASS_SECRET.
+// The studio v1 API origin. Not a secret. Vercel PREVIEW URLs change per deploy —
+// set STUDIO_API_BASE_URL in the Vercel env. Protected previews also need
+// VERCEL_AUTOMATION_BYPASS_SECRET (this preview is public, so it's optional).
 const STUDIO_API_BASE_URL = (
   process.env.STUDIO_API_BASE_URL ??
   "https://studio-phfamfo8s-automat-4a06a9d7.vercel.app"
 ).replace(/\/$/, "");
-// ⚠️ Project-scoped studio key (ak_…). SECRET — never hardcode/commit. Set in the Vercel env.
-const STUDIO_API_KEY = process.env.STUDIO_API_KEY ?? "";
 const VERCEL_BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+
+// Pass-through auth: the caller supplies their project-scoped studio key (ak_…) as
+// the connector api key; we forward it per-request to the studio v1 API. Nothing
+// is stored or committed. Held in async-local storage for the request's lifetime.
+const callerKey = new AsyncLocalStorage<string>();
 
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -69,7 +64,8 @@ interface ApiOpts {
 }
 
 async function api(method: string, path: string, opts: ApiOpts = {}): Promise<any> {
-  if (!STUDIO_API_KEY) throw new ApiError(500, "config_error", "STUDIO_API_KEY is not set on the MCP server.");
+  const key = callerKey.getStore();
+  if (!key) throw new ApiError(401, "unauthorized", "Missing API key.");
   const url = new URL(STUDIO_API_BASE_URL + path);
   if (opts.query) {
     for (const [k, v] of Object.entries(opts.query)) {
@@ -77,7 +73,7 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
     }
   }
   const headers: Record<string, string> = {
-    authorization: `Bearer ${STUDIO_API_KEY}`,
+    authorization: `Bearer ${key}`,
     accept: "application/json",
   };
   if (opts.body !== undefined) headers["content-type"] = "application/json";
@@ -1032,19 +1028,14 @@ const baseHandler = createMcpHandler(
 // Auth-wrapped handler exports
 // ---------------------------------------------------------------------------
 const authed = async (req: Request): Promise<Response> => {
-  if (!MCP_API_KEY) {
-    return new Response(JSON.stringify({ error: "server_misconfigured", message: "MCP_API_KEY is not set" }), {
-      status: 500,
-      headers: { "content-type": "application/json", ...corsHeaders },
-    });
-  }
-  if (extractKey(req) !== MCP_API_KEY) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
+  const key = extractKey(req);
+  if (!key) {
+    return new Response(JSON.stringify({ error: "unauthorized", message: "Missing API key" }), {
       status: 401,
       headers: { "content-type": "application/json", ...corsHeaders },
     });
   }
-  return baseHandler(req);
+  return callerKey.run(key, () => baseHandler(req));
 };
 
 const handleOptions = (): Response => new Response(null, { status: 204, headers: corsHeaders });
