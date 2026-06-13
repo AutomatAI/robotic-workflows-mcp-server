@@ -827,8 +827,14 @@ const baseHandler = createMcpHandler(
           }
           if (inc.has("recording")) out.recordingUrl = s.recordingUrl ?? null;
           if (inc.has("logs")) {
-            const lg = await api("GET", `/api/agent/sessions/${sessionId}/logs`, { query: { cursor: logsCursor } });
-            out.logs = { entries: lg.logs ?? [], nextCursor: lg.nextCursor ?? null };
+            // Best-effort: a missing/failing logs endpoint shouldn't fail the whole tool.
+            try {
+              const lg = await api("GET", `/api/agent/sessions/${sessionId}/logs`, { query: { cursor: logsCursor } });
+              out.logs = { entries: lg.logs ?? [], nextCursor: lg.nextCursor ?? null };
+            } catch {
+              out.logs = null;
+              out.logsNote = "Logs unavailable (the session logs endpoint is not deployed yet).";
+            }
           }
           return result(out);
         } catch (e) {
