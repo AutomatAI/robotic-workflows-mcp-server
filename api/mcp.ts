@@ -253,6 +253,42 @@ const CODE_MODEL =
 const CODE_EXAMPLE =
   "Example block — {type:'block',name:'Fetch',mode:'code',position:{x:160,y:0},code:\"await page.goto('https://example.com'); return { title: await page.title() };\"}";
 
+// Full authoring guide returned by get_workflow_schema (on-demand, so it can be
+// detailed). This is where an agent learns HOW to write a code/decision node —
+// the JSON Schema only describes structure.
+const AUTHORING_GUIDE = {
+  nodeTypes: "start, end, block, decision, document, hitl. Compose with edges (start → … → end).",
+  codeBlocks:
+    "A block with mode:'code' is deterministic (no LLM tokens). Its `code` runs as the body of an async function — use `await`, TypeScript is supported — and must `return` a value, which becomes the node's output. The run's final result is the last node's return value.",
+  globals: {
+    "$('NodeName')":
+      "The ONLY way to read another node's output: returns that node's return value. There are no per-node global variables — check the node's input.availableNodeNames for valid names.",
+    fetch: "Standard fetch() is available for HTTP/API calls.",
+    "page, context": "Playwright Page and BrowserContext (present when the workflow uses a browser).",
+    secrets: "Project secrets by name, e.g. secrets.MY_KEY (native vault + Doppler; native wins).",
+    "helpers, projectResources": "Workflow helper functions and named project resources.",
+    logger: "logger.info(msg) / logger.error(msg).",
+    "emit, state": "Event emit() and cross-run state (state.sessions.previous, state.artifacts).",
+  },
+  decision: "A decision node has a boolean `expression` (same scope as code). Route the two outgoing edges with handle 'true' / 'false'.",
+  browser:
+    "To record, set settings.browser = { headless:false, recording:true }. `page` is Playwright. Tip: a native dialog (e.g. a 'breached password' bubble after login) can swallow real input clicks and stall navigation — if so, click buttons in-page: await page.evaluate(() => document.querySelector(sel).click()).",
+  examples: [
+    {
+      title: "HTTP fetch → return",
+      code: "const r = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');\nconst ids = await r.json();\nreturn { topIds: ids.slice(0, 5) };",
+    },
+    {
+      title: "Read a previous node's output with $()",
+      code: "const prev = $('Fetch');\nreturn { count: (prev.topIds || []).length };",
+    },
+    {
+      title: "Browser code block",
+      code: "await page.goto('https://example.com');\nreturn { title: await page.title() };",
+    },
+  ],
+};
+
 const DefinitionInput = z
   .record(z.string(), z.unknown())
   .describe(
@@ -346,14 +382,14 @@ const baseHandler = createMcpHandler(
       {
         title: "Get workflow schema",
         description:
-          "Returns the JSON Schema for an Automat workflow definition. Call before creating or editing a workflow to learn the exact node/edge/settings shape. Returns: { runtimeVersion, jsonSchema }.",
+          "Returns the workflow JSON Schema PLUS an authoringGuide (how to write code/decision nodes: globals like $('NodeName') and fetch, async/return semantics, examples). Call before creating or editing a workflow. Returns: { runtimeVersion, jsonSchema, authoringGuide }.",
         inputSchema: { runtimeVersion: z.string().describe("Defaults to 'latest'.").optional() },
         annotations: RO,
       },
       async ({ runtimeVersion }) => {
         try {
           const r = await api("GET", "/api/agent/schema");
-          return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema });
+          return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema, authoringGuide: AUTHORING_GUIDE });
         } catch (e) {
           return fail(e);
         }
