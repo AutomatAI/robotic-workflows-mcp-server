@@ -4,7 +4,7 @@ A remote [MCP](https://modelcontextprotocol.io/) server that lets AI agents buil
 
 The server is a thin forwarder: each tool calls an API-key-authenticated, single-project endpoint in the studio app (the "thin client"), which reuses studio's existing validation, versioning, and execution code.
 
-> **Status:** all 33 tools are implemented as schema-complete stubs. Each has its real input schema and returns spec-shaped data marked `_stub: true`. Handlers forward to the thin client as it comes online.
+> **Status:** the 31 workflow tools are implemented as schema-complete stubs — each has its real input schema and returns spec-shaped data marked `_stub: true`; handlers forward to the thin client as it comes online. `ping` is a plain health check.
 
 ## Endpoint
 
