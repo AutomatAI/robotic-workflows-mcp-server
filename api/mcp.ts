@@ -242,9 +242,19 @@ const WorkflowStatus = z.enum(["development", "preview", "active", "disabled"]);
 const RunStatus = z.enum(["pending", "queued", "executing", "paused", "completed", "failed", "canceled"]);
 const Environment = z.enum(["development", "staging", "preview", "production"]);
 const Lifecycle = z.enum(["development", "preview", "active"]);
+// Shared, concise execution model — folded into the definition/patch param
+// descriptions so an agent can author nodes without a separate get_workflow_schema
+// call (which remains the full reference). Kept tight to respect the ~2KB budget.
+const CODE_MODEL =
+  "Node types: start, end, block, decision, document, hitl. A `block` is deterministic `code` (mode:'code', the default — no LLM tokens) or AI `execute` (mode:'execute' — costs tokens; prefer code). Block code runs async (await + TypeScript) and must `return` a value; in-scope globals: `page` & `context` (Playwright), `$('NodeName')` (a prior node's return), `secrets`, `helpers`, `projectResources`, `logger`. A `decision` has a boolean `expression` (same globals) and routes via edge `handle:'true'|'false'`. Browser recording: settings.browser={headless:false,recording:true}.";
+const CODE_EXAMPLE =
+  "Example block — {type:'block',name:'Fetch',mode:'code',position:{x:160,y:0},code:\"await page.goto('https://example.com'); return { title: await page.title() };\"}";
+
 const DefinitionInput = z
   .record(z.string(), z.unknown())
-  .describe("Full @automat/runtime WorkflowSchema definition. Call get_workflow_schema for the exact shape; validated server-side.");
+  .describe(
+    `Full @automat/runtime workflow definition: { name, description?, settings, nodes[], edges[], inputSchema?, outputSchema? }. ${CODE_MODEL} ${CODE_EXAMPLE} Call get_workflow_schema for the full field reference. Validated server-side.`,
+  );
 const WorkflowPatchInput = z
   .object({
     nodes: z
@@ -262,7 +272,9 @@ const WorkflowPatchInput = z
       .optional(),
   })
   .passthrough()
-  .describe("Composite patch. Send only what changes. Top-level WorkflowSchema fields also accepted (settings deep-merges; others replace). Applied: nodes.remove → nodes.add → nodes.update → edges.remove → edges.add → top-level.");
+  .describe(
+    `Composite patch — send only what changes: { nodes:{add[],update[{name,patch}],remove[]}, edges:{add[],remove[]}, ...top-level } (settings deep-merges; others replace). Applied: nodes.remove → add → update → edges.remove → add → top-level. ${CODE_MODEL} ${CODE_EXAMPLE}`,
+  );
 const limit = z.number().int().min(1).max(100).describe("Page size (default 25, max 100).").optional();
 const cursor = z.string().describe("Pagination cursor from a previous response's nextCursor.").optional();
 
