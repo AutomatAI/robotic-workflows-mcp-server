@@ -21,6 +21,9 @@ import { z } from "zod";
 // Protected previews also need VERCEL_AUTOMATION_BYPASS_SECRET.
 const STUDIO_API_BASE_URL = (process.env.STUDIO_API_BASE_URL ?? "").replace(/\/$/, "");
 const VERCEL_BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+// Optional: pin runs to a Trigger preview branch (hackathon: pr-123). When set,
+// run_workflow defaults environment→'preview' and branch→this value.
+const STUDIO_RUN_BRANCH = process.env.STUDIO_RUN_BRANCH || undefined;
 
 // Pass-through auth: the caller supplies their project-scoped studio key (ak_…) as
 // the connector api key; we forward it per-request to the studio v1 API. Nothing
@@ -763,17 +766,20 @@ const baseHandler = createMcpHandler(
       {
         title: "Run workflow",
         description:
-          "Triggers a run of the workflow's active version. `input` is validated against the workflow's input schema. `environment` selects the run environment (default production). Returns: { sessionId, status: 'queued' } — poll get_run.",
+          "Triggers a run of the workflow's active version. `input` is validated against the workflow's input schema. `environment` selects the run tier; for preview runs, `branch` pins the deployed preview-branch runtime. Both default to the server's configured values. Returns: { sessionId, status: 'queued' } — poll get_run.",
         inputSchema: {
           workflowId: z.string(),
           input: z.record(z.string(), z.unknown()).optional(),
-          environment: Environment.describe("Run environment; defaults to production.").optional(),
+          environment: Environment.describe("Run environment; defaults to the server config.").optional(),
+          branch: z.string().describe("Preview branch to pin (preview environment only); defaults to the server config.").optional(),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ workflowId, input, environment }) => {
+      async ({ workflowId, input, environment, branch }) => {
         try {
-          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { query: { environment }, body: input ?? {} });
+          const env = environment ?? (STUDIO_RUN_BRANCH ? "preview" : undefined);
+          const br = branch ?? (env === "preview" ? STUDIO_RUN_BRANCH : undefined);
+          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { query: { environment: env, branch: br }, body: input ?? {} });
           return result({ sessionId: r.sessionId, status: r.status ?? "queued" });
         } catch (e) {
           return fail(e);
