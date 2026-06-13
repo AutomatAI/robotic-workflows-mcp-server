@@ -137,21 +137,12 @@ const WorkflowPatchInput = z
 // ---------------------------------------------------------------------------
 const baseHandler = createMcpHandler(
   (server) => {
-    // ---- Connectivity ----------------------------------------------------
+    // ---- Health ----------------------------------------------------------
     server.tool(
       "ping",
-      "Health check. Returns 'pong' plus server time. Confirms the connection is live.",
+      "Health check. Returns 'pong' plus server time. Confirms the MCP server is live (independent of the thin client).",
       {},
       async () => ({ content: [{ type: "text", text: `pong @ ${now()}` }] }),
-    );
-
-    server.tool(
-      "echo",
-      "Echo a message back (round-trip / argument-passing test).",
-      { message: z.string().describe("Text to echo back") },
-      async ({ message }) => ({
-        content: [{ type: "text", text: `You said: ${message}` }],
-      }),
     );
 
     // ---- A. Context & schema --------------------------------------------
