@@ -406,14 +406,14 @@ const baseHandler = createMcpHandler(
       {
         title: "Get workflow schema",
         description:
-          "Returns the workflow definition JSON Schema (exact field shapes). Call get_docs for HOW to write node code (globals, $(), examples). Returns: { runtimeVersion, jsonSchema }.",
+          "Returns the workflow definition JSON Schema (exact field shapes for nodes, edges, settings). Returns: { runtimeVersion, jsonSchema }.",
         inputSchema: { runtimeVersion: z.string().describe("Defaults to 'latest'.").optional() },
         annotations: RO,
       },
       async ({ runtimeVersion }) => {
         try {
           const r = await api("GET", "/api/agent/schema");
-          return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema, seeAlso: "Call get_docs for code-node authoring (globals, $(), examples)." });
+          return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema });
         } catch (e) {
           return fail(e);
         }
