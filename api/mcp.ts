@@ -16,13 +16,10 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 // Config + per-request auth.
 // ---------------------------------------------------------------------------
-// The studio v1 API origin. Not a secret. Vercel PREVIEW URLs change per deploy —
-// set STUDIO_API_BASE_URL in the Vercel env. Protected previews also need
-// VERCEL_AUTOMATION_BYPASS_SECRET (this preview is public, so it's optional).
-const STUDIO_API_BASE_URL = (
-  process.env.STUDIO_API_BASE_URL ??
-  "https://studio-5a08h7206-automat-4a06a9d7.vercel.app"
-).replace(/\/$/, "");
+// The studio agent API origin — set STUDIO_API_BASE_URL in the Vercel env (the
+// single source of truth; no fallback). Studio preview URLs change per deploy.
+// Protected previews also need VERCEL_AUTOMATION_BYPASS_SECRET.
+const STUDIO_API_BASE_URL = (process.env.STUDIO_API_BASE_URL ?? "").replace(/\/$/, "");
 const VERCEL_BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 
 // Pass-through auth: the caller supplies their project-scoped studio key (ak_…) as
@@ -64,6 +61,7 @@ interface ApiOpts {
 }
 
 async function api(method: string, path: string, opts: ApiOpts = {}): Promise<any> {
+  if (!STUDIO_API_BASE_URL) throw new ApiError(500, "config_error", "STUDIO_API_BASE_URL is not set on the MCP server.");
   const key = callerKey.getStore();
   if (!key) throw new ApiError(401, "unauthorized", "Missing API key.");
   const url = new URL(STUDIO_API_BASE_URL + path);
