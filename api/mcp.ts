@@ -622,8 +622,15 @@ const baseHandler = createMcpHandler(
       },
       async ({ workflowId, versionId, expectedActiveVersionId }) => {
         try {
+          // The revert endpoint requires the concurrency token; auto-fill it from
+          // the current active version when the caller doesn't supply one.
+          let expected = expectedActiveVersionId;
+          if (!expected) {
+            const cur = await api("GET", `/api/agent/workflows/${workflowId}`);
+            expected = cur.workflow?.activeVersionId ?? undefined;
+          }
           const r = await api("POST", `/api/agent/workflows/${workflowId}/versions/${versionId}/revert`, {
-            body: { expectedActiveVersionId },
+            body: { expectedActiveVersionId: expected },
           });
           return result({ versionId: r.version?.id, versionNumber: r.version?.versionNumber, revertedFromVersionNumber: r.revertedFromVersionNumber });
         } catch (e) {
@@ -978,8 +985,9 @@ const baseHandler = createMcpHandler(
       async ({ lifecycle, search, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", "/api/agent/resources", { query: { lifecycle, name: search, page, pageSize: lim ?? 25 } });
-          const items = (r.resources ?? []).map((x: any) => ({ name: x.name, kind: "data", description: x.description ?? null, lifecycle: x.lifecycle ?? null, updatedAt: x.updatedAt }));
+          const r = await api("GET", "/api/agent/resources", { query: { lifecycle, page, pageSize: lim ?? 25 } });
+          let items = (r.resources ?? []).map((x: any) => ({ name: x.name, kind: "data", description: x.description ?? null, lifecycle: x.lifecycle ?? null, updatedAt: x.updatedAt }));
+          if (search) { const q = search.toLowerCase(); items = items.filter((x: any) => (x.name ?? "").toLowerCase().includes(q)); }
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
           return fail(e);
