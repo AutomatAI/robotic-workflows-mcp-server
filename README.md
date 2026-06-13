@@ -1,108 +1,88 @@
-# Automat Robotic Workflows MCP Server
+# Automat Workflows MCP Server
 
-An [MCP](https://modelcontextprotocol.io/) server that lets AI agents build, deploy and
-manage Automat RPA workflows the same way humans do in the studio.
+A remote [MCP](https://modelcontextprotocol.io/) server that lets AI agents build, run, and manage Automat RPA workflows — the same operations humans perform in the studio.
 
-**Status:** the full workflow tool surface (build / manage / run / debug) is implemented as
-**schema-complete stubs** — every tool has its real input schema and returns realistic,
-spec-shaped data marked `_stub: true`. The stubs are wired to the studio **thin client**
-(API-key-authed, single-project-scoped endpoints) as it comes online. The authoritative
-contract for that thin client is **[docs/MCP_TOOLS_SPEC.md](docs/MCP_TOOLS_SPEC.md)** — point
-an agent at this repo and the spec + `api/mcp.ts` schemas fully describe the requirements.
+The server is a thin forwarder: each tool calls an API-key-authenticated, single-project endpoint in the studio app (the "thin client"), which reuses studio's existing validation, versioning, and execution code. Tool contracts are defined in [docs/MCP_TOOLS_SPEC.md](docs/MCP_TOOLS_SPEC.md).
 
-## Live endpoint
+> **Status:** all 33 tools are implemented as schema-complete stubs. Each has its real input schema and returns spec-shaped data marked `_stub: true`. Handlers forward to the thin client as it comes online.
+
+## Endpoint
 
 ```
 https://workflows.runautomat.com/api/mcp
 ```
 
-(The Vercel default URL `https://robotic-workflows-mcp-server.vercel.app/api/mcp` also works.)
+Streamable HTTP, stateless. The Vercel default URL (`https://robotic-workflows-mcp-server.vercel.app/api/mcp`) also resolves.
 
-- Transport: **Streamable HTTP** (stateless — no Redis).
-- Auth: a single shared API key, accepted via (in priority order):
-  1. `?api_key=<KEY>` query param — **the only option that works in the Claude app connector UI** (which has no header field).
-  2. `x-api-key: <KEY>` header.
-  3. `Authorization: Bearer <KEY>` header — clean path for Claude Code CLI.
+## Authentication
 
-> **⚠️ The v1 key is hardcoded in [`api/mcp.ts`](api/mcp.ts) and committed to this repo.**
-> It is a throwaway demo key guarding dummy tools only. **Rotate it** before wiring up real
-> workflow tools by setting `MCP_API_KEY` in the Vercel project env (Production + Preview) —
-> the env var overrides the hardcoded default.
+A single shared API key, accepted three ways (checked in order):
 
-## Connecting clients
+| Source | Use |
+| --- | --- |
+| `?api_key=<KEY>` query param | Claude web/desktop connector (its UI has no header field) |
+| `x-api-key: <KEY>` header | generic clients |
+| `Authorization: Bearer <KEY>` header | Claude Code CLI |
 
-Replace `<KEY>` with the API key (current value is the default in `api/mcp.ts`).
+> The v1 key is hardcoded in [`api/mcp.ts`](api/mcp.ts) and committed to this repo. It guards stub tools only. Before the tools touch real data, set `MCP_API_KEY` in the Vercel project environment to override it.
 
-### Claude web / desktop app (custom connector)
-Settings → Connectors → **Add custom connector** → URL:
+## Connect a client
+
+Replace `<KEY>` with the API key.
+
+**Claude web / desktop** — Settings → Connectors → Add custom connector → URL:
+
 ```
 https://workflows.runautomat.com/api/mcp?api_key=<KEY>
 ```
-No OAuth prompt — valid requests return 200, so the connector attaches directly.
-(The connector UI is OAuth-only and has no header field, which is exactly why the key rides
-in the URL — see [anthropics/claude-ai-mcp#112](https://github.com/anthropics/claude-ai-mcp/issues/112).)
 
-### Claude Code CLI
+**Claude Code**
+
 ```bash
-# Key in URL:
 claude mcp add --transport http automat \
   "https://workflows.runautomat.com/api/mcp?api_key=<KEY>"
-
-# …or clean URL with a header:
-claude mcp add --transport http automat \
-  https://workflows.runautomat.com/api/mcp \
-  --header "Authorization: Bearer <KEY>"
 ```
-Then `/mcp` to confirm it's connected, and ask Claude to call `ping`.
 
-### MCP Inspector
+**MCP Inspector**
+
 ```bash
 npx @modelcontextprotocol/inspector
+# Streamable HTTP → https://workflows.runautomat.com/api/mcp?api_key=<KEY>
 ```
-Transport **Streamable HTTP**, URL `https://workflows.runautomat.com/api/mcp?api_key=<KEY>`.
 
 ## Tools
 
-Full schemas + the thin-client contract live in **[docs/MCP_TOOLS_SPEC.md](docs/MCP_TOOLS_SPEC.md)**. Summary:
+Full schemas and the thin-client contract are in [docs/MCP_TOOLS_SPEC.md](docs/MCP_TOOLS_SPEC.md).
 
 | Group | Tools |
-|-------|-------|
+| --- | --- |
 | Connectivity | `ping`, `echo` |
-| Context & schema | `list_runtime_versions`, `get_workflow_schema` |
-| Workflow CRUD | `list_workflows`, `create_workflow`, `copy_workflow`, `read_workflow`, `update_workflow`, `delete_workflow` |
-| Editing | `edit_workflow` (composite patch, auto-saves a version) |
+| Schema | `list_runtime_versions`, `get_workflow_schema` |
+| Workflows | `list_workflows`, `create_workflow`, `copy_workflow`, `read_workflow`, `update_workflow`, `delete_workflow` |
+| Editing | `edit_workflow` |
 | Versions | `list_versions`, `get_version`, `revert_to_version` |
 | Schedules | `list_schedules`, `create_schedule`, `update_schedule`, `delete_schedule` |
-| Run / monitor / debug | `run_workflow`, `list_runs`, `get_run` (`include: timeline/io/logs/recording`), `cancel_run` |
+| Runs | `run_workflow`, `list_runs`, `get_run`, `cancel_run` |
 | HITL | `list_hitl_tasks`, `complete_hitl_task` |
 | Secrets | `list_secrets`, `set_secrets`, `delete_secret` |
-| Resources & extractors | `list_resources`, `get_resource`, `set_resource`, `delete_resource`, `list_extractors`, `get_extractor` |
+| Resources | `list_resources`, `get_resource`, `set_resource`, `delete_resource` |
+| Extractors | `list_extractors`, `get_extractor` |
 
-## Architecture
-
-- **Stack:** [`mcp-handler`](https://github.com/vercel/mcp-handler) (Vercel adapter that wraps
-  [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk)) deployed
-  as a **plain Vercel Function** — no Next.js. The entire server is one file: [`api/mcp.ts`](api/mcp.ts).
-- **Endpoint path:** the function lives at `api/mcp.ts` → served at `/api/mcp`. (A `/mcp` rewrite
-  was tried but conflicts with Vercel's auto-generated `/api → 404` guard, so `/api/mcp` is canonical.)
-
-## Local development
+## Development
 
 ```bash
 npm install
 npm run dev          # vercel dev → http://localhost:3000/api/mcp
 npm run inspector    # MCP Inspector
+vercel --prod        # deploy (requires vercel login)
 ```
 
-## Deploy
+## Stack
 
-```bash
-vercel --prod        # CLI must be authenticated (vercel login)
-```
+[`mcp-handler`](https://github.com/vercel/mcp-handler) (wrapping [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk)) as a single Vercel Function — no framework. The whole server is [`api/mcp.ts`](api/mcp.ts). It serves `/api/mcp`; a `/mcp` rewrite is not used because it collides with Vercel's built-in `/api` routing guard.
 
 ## Roadmap
 
-- Replace dummy tools with real workflow CRUD + run/monitor (wired to the studio DB).
-- Per-user / per-tenant API keys (v1 is a single shared static key).
-- Proper OAuth 2.1 for native connector-UI auth.
-- Rate limiting + observability.
+- Wire tools to the studio thin client (replace the stubs).
+- Per-project API keys (v1 uses one shared key).
+- Extractor authoring and file-resource uploads.
