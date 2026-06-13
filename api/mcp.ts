@@ -137,14 +137,6 @@ const WorkflowPatchInput = z
 // ---------------------------------------------------------------------------
 const baseHandler = createMcpHandler(
   (server) => {
-    // ---- Health ----------------------------------------------------------
-    server.tool(
-      "ping",
-      "Health check. Returns 'pong' plus server time. Confirms the MCP server is live (independent of the thin client).",
-      {},
-      async () => ({ content: [{ type: "text", text: `pong @ ${now()}` }] }),
-    );
-
     // ---- A. Context & schema --------------------------------------------
     server.tool(
       "list_runtime_versions",
