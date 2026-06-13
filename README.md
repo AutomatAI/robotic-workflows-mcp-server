@@ -2,9 +2,9 @@
 
 A remote [MCP](https://modelcontextprotocol.io/) server that lets AI agents build, run, and manage Automat RPA workflows — the same operations humans perform in the studio.
 
-The server is a thin forwarder: each tool calls an API-key-authenticated, single-project endpoint in the studio app (the "thin client"), which reuses studio's existing validation, versioning, and execution code.
+The server is a thin forwarder: each tool calls the studio app's keyless agent API (`/api/agent/*`), which resolves the project from the API key and reuses studio's existing validation, versioning, and execution code.
 
-> **Status:** all 31 tools are implemented as schema-complete stubs — each has its real input schema and returns spec-shaped data marked `_stub: true`; handlers forward to the thin client as it comes online. (Connection liveness uses MCP's built-in protocol-level [ping](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/ping), so there is no `ping` tool.)
+> **Status:** live. All 31 tools forward to the studio API. Connection liveness uses MCP's built-in protocol-level [ping](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/ping), so there is no `ping` tool.
 
 ## Endpoint
 
@@ -16,38 +16,43 @@ Streamable HTTP, stateless. The Vercel default URL (`https://robotic-workflows-m
 
 ## Authentication
 
-A single shared API key, accepted three ways (checked in order):
+**Pass-through.** The caller supplies a project-scoped studio key (`ak_…`); the server forwards it to the studio API per request. No keys are stored or committed. The key is read three ways (checked in order):
 
 | Source | Use |
 | --- | --- |
-| `?api_key=<KEY>` query param | Claude web/desktop connector (its UI has no header field) |
-| `x-api-key: <KEY>` header | generic clients |
-| `Authorization: Bearer <KEY>` header | Claude Code CLI |
+| `?api_key=ak_…` query param | Claude web/desktop connector (its UI has no header field) |
+| `x-api-key: ak_…` header | generic clients |
+| `Authorization: Bearer ak_…` header | Claude Code CLI |
 
-> The v1 key is hardcoded in [`api/mcp.ts`](api/mcp.ts) and committed to this repo. It guards stub tools only. Before the tools touch real data, set `MCP_API_KEY` in the Vercel project environment to override it.
+## Configuration (Vercel env)
+
+| Var | Purpose |
+| --- | --- |
+| `STUDIO_API_BASE_URL` | Origin of the studio agent API. **Studio preview URLs change per deploy** — update this each studio redeploy (or point at a stable alias once preview protection is lifted). |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | Optional — only if the studio deployment is protected. |
 
 ## Connect a client
 
-Replace `<KEY>` with the API key.
+Replace `ak_…` with your project-scoped studio key.
 
 **Claude web / desktop** — Settings → Connectors → Add custom connector → URL:
 
 ```
-https://workflows.runautomat.com/api/mcp?api_key=<KEY>
+https://workflows.runautomat.com/api/mcp?api_key=ak_…
 ```
 
 **Claude Code**
 
 ```bash
 claude mcp add --transport http automat \
-  "https://workflows.runautomat.com/api/mcp?api_key=<KEY>"
+  "https://workflows.runautomat.com/api/mcp?api_key=ak_…"
 ```
 
 **MCP Inspector**
 
 ```bash
 npx @modelcontextprotocol/inspector
-# Streamable HTTP → https://workflows.runautomat.com/api/mcp?api_key=<KEY>
+# Streamable HTTP → https://workflows.runautomat.com/api/mcp?api_key=ak_…
 ```
 
 ## Development
