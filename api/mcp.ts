@@ -4,27 +4,36 @@ import { z } from "zod";
 /**
  * Automat Robotic Workflows MCP Server.
  *
- * Single stateless Streamable-HTTP endpoint deployed as a plain Vercel Function.
+ * Stateless Streamable-HTTP endpoint (plain Vercel Function). Each tool forwards
+ * to the studio "thin client" — the project-scoped v1 API under /api/v1/... —
+ * authenticating with a project-scoped key (ak_...). The project is resolved
+ * from that key server-side, so no projectId is sent.
  *
- * STATUS: the tools below are **schema-complete stubs**. Every tool has its real
- * name, description, input schema, and annotations, and returns a realistic,
- * spec-shaped response marked `_stub: true`. They are NOT yet wired to studio —
- * once the studio "thin client" (API-key-authed, single-project-scoped endpoints)
- * is ready, each handler forwards to it.
- *
- * The authoritative contract for the thin client lives in `README.md` (Tools section).
- * Point your agent at this repo: the README + these schemas fully describe what the
- * thin client must expose.
+ * Contract reference: README.md (Tools section).
  */
 
 // ---------------------------------------------------------------------------
-// Auth — single shared static API key, single-project-scoped.
+// Inbound auth — the key MCP clients use to reach THIS server.
 // ---------------------------------------------------------------------------
-// ⚠️ v1 key is hardcoded so the server deploys with zero env config. It guards
-// stub tools only. Rotate by setting MCP_API_KEY in the Vercel env.
-const MCP_API_KEY =
-  process.env.MCP_API_KEY ??
-  "a0493f411923a3cd46b690a0857e0f296872560b4dba048827e7f3f4bccb4439";
+// Set via the Vercel env. This server now proxies REAL workflow mutations, so the
+// inbound key must NOT be hardcoded/committed — keep it an env-only secret and
+// rotate the old throwaway value.
+const MCP_API_KEY = process.env.MCP_API_KEY ?? "";
+
+// ---------------------------------------------------------------------------
+// Outbound — the studio v1 API this server forwards to.
+// ---------------------------------------------------------------------------
+// ⚠️ STUDIO_API_BASE_URL must point at the v1 API origin. Vercel PREVIEW URLs
+//    change per deploy — set this (and STUDIO_API_KEY) in the Vercel env rather
+//    than relying on the defaults below. Protected previews also need
+//    VERCEL_AUTOMATION_BYPASS_SECRET.
+const STUDIO_API_BASE_URL = (
+  process.env.STUDIO_API_BASE_URL ??
+  "https://studio-phfamfo8s-automat-4a06a9d7.vercel.app"
+).replace(/\/$/, "");
+// ⚠️ Project-scoped studio key (ak_…). SECRET — never hardcode/commit. Set in the Vercel env.
+const STUDIO_API_KEY = process.env.STUDIO_API_KEY ?? "";
+const VERCEL_BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -34,7 +43,6 @@ const corsHeaders: Record<string, string> = {
   "Access-Control-Expose-Headers": "mcp-session-id",
 };
 
-/** API key from ?api_key= (connector UI), x-api-key, or Authorization: Bearer. */
 function extractKey(req: Request): string | null {
   const fromQuery = new URL(req.url).searchParams.get("api_key");
   if (fromQuery) return fromQuery;
@@ -46,79 +54,206 @@ function extractKey(req: Request): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Stub helpers + fake data (replaced by thin-client calls later)
+// Studio API client
 // ---------------------------------------------------------------------------
-const now = () => new Date().toISOString();
-const stub = (data: Record<string, unknown>) => ({
-  content: [
-    { type: "text" as const, text: JSON.stringify({ _stub: true, ...data }, null, 2) },
-  ],
+class ApiError extends Error {
+  constructor(public status: number, public apiCode: string, message: string) {
+    super(message);
+  }
+}
+
+interface ApiOpts {
+  query?: Record<string, unknown>;
+  body?: unknown;
+  idempotencyKey?: string;
+}
+
+async function api(method: string, path: string, opts: ApiOpts = {}): Promise<any> {
+  if (!STUDIO_API_KEY) throw new ApiError(500, "config_error", "STUDIO_API_KEY is not set on the MCP server.");
+  const url = new URL(STUDIO_API_BASE_URL + path);
+  if (opts.query) {
+    for (const [k, v] of Object.entries(opts.query)) {
+      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+    }
+  }
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${STUDIO_API_KEY}`,
+    accept: "application/json",
+  };
+  if (opts.body !== undefined) headers["content-type"] = "application/json";
+  if (opts.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey;
+  if (VERCEL_BYPASS) headers["x-vercel-protection-bypass"] = VERCEL_BYPASS;
+
+  const res = await fetch(url, {
+    method,
+    headers,
+    body:
+      opts.body !== undefined
+        ? typeof opts.body === "string"
+          ? opts.body
+          : JSON.stringify(opts.body)
+        : undefined,
+  });
+  const text = await res.text();
+  let data: any = undefined;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+  }
+  if (!res.ok) {
+    const apiCode = (data && data.error) || `http_${res.status}`;
+    const message = (data && (data.message || data.error)) || text || res.statusText;
+    throw new ApiError(res.status, String(apiCode), String(message));
+  }
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Result + error helpers (MCP tool result shape)
+// ---------------------------------------------------------------------------
+const result = (data: Record<string, unknown>) => ({
+  content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
 
-const WF_ID = "11111111-1111-1111-1111-111111111111";
-const VERSION_ID = "22222222-2222-2222-2222-222222222222";
-const SESSION_ID = "33333333-3333-3333-3333-333333333333";
+function ourCode(status: number): string {
+  switch (status) {
+    case 400: return "bad_request";
+    case 401: return "unauthorized";
+    case 403: return "forbidden";
+    case 404: return "not_found";
+    case 409: return "conflict";
+    case 422: return "validation_failed";
+    case 429: return "rate_limited";
+    default: return "internal_error";
+  }
+}
 
-/** A minimal valid-shaped workflow definition (start → block → end). */
-const SAMPLE_DEFINITION = {
-  name: "Sample Workflow",
-  description: "A stub workflow definition.",
-  runtimeVersion: "latest",
-  settings: { browser: { headless: true }, retry: { maxAttempts: 1 } },
-  nodes: [
-    { type: "start", name: "Start", position: { x: 0, y: 0 } },
-    {
-      type: "block",
-      name: "DoWork",
-      mode: "code",
-      code: "logger.info('hello'); return { ok: true };",
-      position: { x: 240, y: 0 },
-    },
-    { type: "end", name: "End", position: { x: 480, y: 0 } },
-  ],
-  edges: [
-    { from: "Start", to: "DoWork" },
-    { from: "DoWork", to: "End" },
-  ],
+function fail(e: unknown) {
+  if (e instanceof ApiError) {
+    return result({ error: { code: ourCode(e.status), status: e.status, message: e.message } });
+  }
+  return result({ error: { code: "internal_error", message: e instanceof Error ? e.message : String(e) } });
+}
+
+const comingSoon = (message: string) =>
+  result({ coming_soon: true, message: `Coming soon: ${message}` });
+
+// Pagination: our tools speak {limit, cursor}/{items, nextCursor}; the API speaks
+// {page, pageSize}/{..., totalPages, currentPage}. Translate the cursor as a page number.
+const toPage = (cursor?: string) => {
+  const p = cursor ? parseInt(cursor, 10) : 1;
+  return Number.isFinite(p) && p > 0 ? p : 1;
 };
+const nextCursor = (currentPage: number, totalPages: number) =>
+  currentPage < totalPages ? String(currentPage + 1) : null;
+const durMs = (start?: string | null, end?: string | null) =>
+  start && end ? Math.max(0, new Date(end).getTime() - new Date(start).getTime()) : null;
 
-// Shared enums
+// ---------------------------------------------------------------------------
+// Ported from studio/lib/builder/ai/tools.ts — apply a composite patch to a
+// workflow definition (read-modify-write; the v1 API only accepts a full PUT).
+// ---------------------------------------------------------------------------
+const isPlainObject = (v: any): v is Record<string, any> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+function deepMerge(base: any, patch: any): any {
+  if (!isPlainObject(patch)) return patch;
+  if (!isPlainObject(base)) return patch;
+  const out: Record<string, any> = { ...base };
+  for (const [k, v] of Object.entries(patch)) {
+    out[k] = isPlainObject(v) && isPlainObject(out[k]) ? deepMerge(out[k], v) : v;
+  }
+  return out;
+}
+
+function applyNodeOps(next: any, ops: any) {
+  if (ops.remove?.length) {
+    const removeSet = new Set(ops.remove);
+    const unknown = ops.remove.filter((n: string) => !next.nodes.some((nd: any) => nd.name === n));
+    if (unknown.length) throw new Error(`Cannot remove unknown node(s): ${unknown.join(", ")}`);
+    next.nodes = next.nodes.filter((nd: any) => !removeSet.has(nd.name));
+    next.edges = (next.edges ?? []).filter((e: any) => !removeSet.has(e.from) && !removeSet.has(e.to));
+  }
+  if (ops.add?.length) {
+    const existing = new Set(next.nodes.map((nd: any) => nd.name));
+    for (const nn of ops.add) {
+      if (existing.has(nn.name)) throw new Error(`Cannot add node "${nn.name}": a node with that name already exists.`);
+      next.nodes.push(nn);
+      existing.add(nn.name);
+    }
+  }
+  if (ops.update?.length) {
+    for (const { name, patch: np } of ops.update) {
+      const idx = next.nodes.findIndex((nd: any) => nd.name === name);
+      if (idx === -1) throw new Error(`Cannot update unknown node "${name}".`);
+      const merged = { ...next.nodes[idx], ...np };
+      const newName = typeof np.name === "string" ? np.name : undefined;
+      if (newName && newName !== name) {
+        if (next.nodes.some((nd: any, i: number) => i !== idx && nd.name === newName))
+          throw new Error(`Cannot rename "${name}" to "${newName}": that name is already taken.`);
+        next.edges = (next.edges ?? []).map((e: any) => ({
+          ...e,
+          from: e.from === name ? newName : e.from,
+          to: e.to === name ? newName : e.to,
+        }));
+      }
+      next.nodes[idx] = merged;
+    }
+  }
+}
+
+function applyEdgeOps(next: any, ops: any) {
+  if (ops.remove?.length) {
+    next.edges = (next.edges ?? []).filter(
+      (e: any) => !ops.remove.some((t: any) => t.from === e.from && t.to === e.to),
+    );
+  }
+  if (ops.add?.length) {
+    const known = new Set(next.nodes.map((nd: any) => nd.name));
+    const unknown = ops.add.flatMap((e: any) => {
+      const m: string[] = [];
+      if (!known.has(e.from)) m.push(`from "${e.from}"`);
+      if (!known.has(e.to)) m.push(`to "${e.to}"`);
+      return m;
+    });
+    if (unknown.length) throw new Error(`Cannot add edge with unknown endpoint(s): ${unknown.join(", ")}.`);
+    next.edges = [...(next.edges ?? []), ...ops.add];
+  }
+}
+
+function applyWorkflowPatch(current: any, patch: any): any {
+  const next = JSON.parse(JSON.stringify(current ?? {}));
+  if (!Array.isArray(next.nodes)) next.nodes = [];
+  if (!Array.isArray(next.edges)) next.edges = [];
+  if (patch.nodes !== undefined) applyNodeOps(next, patch.nodes);
+  if (patch.edges !== undefined) applyEdgeOps(next, patch.edges);
+  if (patch.settings !== undefined)
+    next.settings = patch.settings === null ? null : deepMerge(next.settings, patch.settings);
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === "nodes" || k === "edges" || k === "settings") continue;
+    if (v !== undefined) next[k] = v;
+  }
+  return next;
+}
+
+// Shared input schema pieces
 const WorkflowStatus = z.enum(["development", "preview", "active", "disabled"]);
-const RunStatus = z.enum([
-  "pending",
-  "queued",
-  "executing",
-  "paused",
-  "completed",
-  "failed",
-  "canceled",
-]);
+const RunStatus = z.enum(["pending", "queued", "executing", "paused", "completed", "failed", "canceled"]);
 const Environment = z.enum(["development", "staging", "preview", "production"]);
-
-// Loosely-typed graph payloads — the canonical @automat/runtime WorkflowSchema is
-// validated server-side by the thin client. Call get_workflow_schema for the shape.
+const Lifecycle = z.enum(["development", "preview", "active"]);
 const DefinitionInput = z
   .record(z.string(), z.unknown())
-  .describe(
-    "Full @automat/runtime WorkflowSchema definition. Call get_workflow_schema for the exact shape; validated server-side.",
-  );
-
+  .describe("Full @automat/runtime WorkflowSchema definition. Call get_workflow_schema for the exact shape; validated server-side.");
 const WorkflowPatchInput = z
   .object({
     nodes: z
       .object({
         add: z.array(z.record(z.string(), z.unknown())).optional(),
-        update: z
-          .array(
-            z.object({
-              name: z.string().describe("Name of the node to update."),
-              patch: z
-                .record(z.string(), z.unknown())
-                .describe("Shallow-merged fields. Set `name` to rename (edges auto-rewrite)."),
-            }),
-          )
-          .optional(),
-        remove: z.array(z.string()).describe("Node names to remove.").optional(),
+        update: z.array(z.object({ name: z.string(), patch: z.record(z.string(), z.unknown()) })).optional(),
+        remove: z.array(z.string()).optional(),
       })
       .optional(),
     edges: z
@@ -129,40 +264,65 @@ const WorkflowPatchInput = z
       .optional(),
   })
   .passthrough()
-  .describe(
-    "Composite patch. Send only what changes. Top-level WorkflowSchema fields are also accepted (settings deep-merges; others replace). Applied in order: nodes.remove → nodes.add → nodes.update → edges.remove → edges.add → top-level.",
-  );
+  .describe("Composite patch. Send only what changes. Top-level WorkflowSchema fields also accepted (settings deep-merges; others replace). Applied: nodes.remove → nodes.add → nodes.update → edges.remove → edges.add → top-level.");
+const limit = z.number().int().min(1).max(100).describe("Page size (default 25, max 100).").optional();
+const cursor = z.string().describe("Pagination cursor from a previous response's nextCursor.").optional();
 
-// Tool annotations (hints; see MCP spec). RO = read-only & idempotent.
 const RO = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const CREATE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const UPSERT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const REMOVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 
-// Pagination params reused across list tools.
-const limit = z.number().int().min(1).max(100).describe("Page size (default 25, max 100).").optional();
-const cursor = z.string().describe("Pagination cursor from a previous response's nextCursor.").optional();
+// Shape mappers (API → our documented tool output)
+const mapWorkflow = (w: any) => ({
+  workflowId: w.id,
+  name: w.name,
+  description: w.description ?? null,
+  status: w.lifecycle,
+  activeVersionId: w.activeVersionId ?? null,
+  apiEnabled: w.apiEnabled,
+  apiUrlSlug: w.apiUrlSlug ?? null,
+  updatedAt: w.updatedAt,
+});
+
+// Resolve a secret/resource id by name (the v1 API addresses these by id).
+async function findSecretId(name: string): Promise<string | null> {
+  const r = await api("GET", "/api/v1/secrets", { query: { name, pageSize: 1 } });
+  return r.secrets?.[0]?.id ?? null;
+}
+async function findResource(name: string, lifecycle?: string): Promise<any | null> {
+  const r = await api("GET", "/api/v1/resources", { query: { name, lifecycle, pageSize: 1 } });
+  return r.resources?.[0] ?? null;
+}
+
+const MIN_DEFINITION = (name: string) => ({
+  name,
+  nodes: [
+    { type: "start", name: "Start", position: { x: 0, y: 0 } },
+    { type: "end", name: "End", position: { x: 240, y: 0 } },
+  ],
+  edges: [{ from: "Start", to: "End" }],
+  settings: {},
+});
 
 // ---------------------------------------------------------------------------
 // MCP server + tools
 // ---------------------------------------------------------------------------
 const baseHandler = createMcpHandler(
   (server) => {
-    // ---- Context & schema -----------------------------------------------
+    // ---- Context & schema ----
     server.registerTool(
       "list_runtime_versions",
       {
         title: "List runtime versions",
         description:
-          "Lists the Automat runtime versions a workflow can be pinned to. When to use: only when you need a version other than the default — get_workflow_schema and create_workflow default to the latest. Returns: { versions: [{ version, isLatest, releasedAt }] }.",
+          "Lists the Automat runtime versions a workflow can be pinned to. get_workflow_schema and create_workflow default to the latest. Returns: { versions: [{ version, isLatest }] }.",
         annotations: RO,
       },
       async () =>
-        stub({
-          versions: [
-            { version: "0.12.0", isLatest: true, releasedAt: now() },
-            { version: "0.11.0", isLatest: false, releasedAt: now() },
-          ],
+        result({
+          versions: [{ version: "latest", isLatest: true }],
+          note: "Runtime version selection is not exposed by the API; the schema/create endpoints use the deployment default.",
         }),
     );
 
@@ -171,61 +331,45 @@ const baseHandler = createMcpHandler(
       {
         title: "Get workflow schema",
         description:
-          "Returns the JSON schema, node-type catalog, and worked examples for an Automat workflow definition. When to use: before creating or editing a workflow, to learn the exact shape of nodes, edges, and settings. Returns: { runtimeVersion, jsonSchema, nodeCatalog, edgeRules, examples }. Defaults to the latest runtime version.",
-        inputSchema: {
-          runtimeVersion: z.string().describe("Runtime version to pin the schema to. Defaults to 'latest'.").optional(),
-        },
+          "Returns the JSON Schema for an Automat workflow definition. Call before creating or editing a workflow to learn the exact node/edge/settings shape. Returns: { runtimeVersion, jsonSchema }.",
+        inputSchema: { runtimeVersion: z.string().describe("Defaults to 'latest'.").optional() },
         annotations: RO,
       },
-      async ({ runtimeVersion }) =>
-        stub({
-          runtimeVersion: runtimeVersion ?? "latest",
-          nodeCatalog: [
-            { type: "start", summary: "Entry point (exactly one).", requiredFields: ["name", "position"] },
-            { type: "end", summary: "Exit point (passthrough).", requiredFields: ["name", "position"] },
-            { type: "block", summary: "Code or AI-execute step.", requiredFields: ["name", "position", "mode"] },
-            { type: "decision", summary: "Boolean routing (true/false handles).", requiredFields: ["name", "position", "expression"] },
-            { type: "document", summary: "Extract data from files via an extractor.", requiredFields: ["name", "position", "extractorId", "fileInputs"] },
-            { type: "hitl", summary: "Human-in-the-loop pause/resume.", requiredFields: ["name", "position", "prompt", "actions"] },
-          ],
-          edgeRules: "Edges are { from, to, handle? }. handle is 'true'/'false' for decision, action id or 'timeout' for hitl.",
-          jsonSchema: { note: "STUB — thin client serves the real JSON Schema from @automat/runtime." },
-          examples: [{ title: "start → block → end", definition: SAMPLE_DEFINITION }],
-        }),
+      async ({ runtimeVersion }) => {
+        try {
+          const r = await api("GET", "/api/v1/schema");
+          return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
-    // ---- Workflows ------------------------------------------------------
+    // ---- Workflows ----
     server.registerTool(
       "list_workflows",
       {
         title: "List workflows",
         description:
-          "Lists workflows in the current project (the API key is scoped to one project). When to use: to find a workflow's id before reading, editing, or running it. Prefer the `search` filter over paging through everything. Returns: a page of { workflowId, name, status, activeVersionId, apiEnabled, apiUrlSlug, sessionCount, updatedAt } plus nextCursor.",
-        inputSchema: {
-          status: WorkflowStatus.describe("Filter by lifecycle status.").optional(),
-          search: z.string().describe("Substring match on name/description.").optional(),
-          limit,
-          cursor,
-        },
+          "Lists workflows in the project (scoped to the API key). Use to find a workflow's id. Returns: { items: [{ workflowId, name, status, activeVersionId, apiEnabled, apiUrlSlug, updatedAt }], nextCursor }.",
+        inputSchema: { status: WorkflowStatus.optional(), search: z.string().optional(), limit, cursor },
         annotations: RO,
       },
-      async () =>
-        stub({
-          items: [
-            {
-              workflowId: WF_ID,
-              name: "Sample Workflow",
-              description: "A stub workflow.",
-              status: "development",
-              activeVersionId: VERSION_ID,
-              apiEnabled: false,
-              apiUrlSlug: null,
-              sessionCount: 3,
-              updatedAt: now(),
-            },
-          ],
-          nextCursor: null,
-        }),
+      async ({ status, search, limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", "/api/v1/workflows", { query: { page, pageSize: lim ?? 25 } });
+          let items = (r.workflows ?? []).map(mapWorkflow);
+          if (status) items = items.filter((w: any) => w.status === status);
+          if (search) {
+            const q = search.toLowerCase();
+            items = items.filter((w: any) => (w.name ?? "").toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q));
+          }
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -233,16 +377,29 @@ const baseHandler = createMcpHandler(
       {
         title: "Create workflow",
         description:
-          "Creates a new workflow and its first version in the current project. When to use: to start a new automation. Omit `definition` to get a minimal start → end scaffold you then build with edit_workflow. `runtimeVersion` defaults to the latest. Returns: { workflowId, versionId, versionNumber, status }.",
+          "Creates a new workflow and its first version. Omit `definition` for a minimal start → end scaffold. Returns: { workflowId, versionId, versionNumber, status }.",
         inputSchema: {
-          name: z.string().describe("Human-readable workflow name."),
+          name: z.string(),
           description: z.string().optional(),
           definition: DefinitionInput.optional(),
           runtimeVersion: z.string().describe("Defaults to 'latest'.").optional(),
         },
         annotations: CREATE,
       },
-      async ({ name }) => stub({ workflowId: WF_ID, name, versionId: VERSION_ID, versionNumber: 1, status: "development" }),
+      async ({ name, definition }) => {
+        try {
+          const def = definition ?? MIN_DEFINITION(name);
+          const r = await api("POST", "/api/v1/workflows", { body: { definition: def, name } });
+          return result({
+            workflowId: r.workflow?.id,
+            versionId: r.version?.id,
+            versionNumber: r.version?.versionNumber,
+            status: r.workflow?.lifecycle ?? "development",
+          });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -250,14 +407,23 @@ const baseHandler = createMcpHandler(
       {
         title: "Copy workflow",
         description:
-          "Clones an existing workflow into the same project; the copy's first version is the source's active version. When to use: to fork a workflow as a starting point. Schedules and run history are not copied. Returns: { workflowId, name }.",
-        inputSchema: {
-          workflowId: z.string().describe("Source workflow id."),
-          name: z.string().describe("Name for the copy. Defaults to 'Copy of …'.").optional(),
-        },
+          "Clones an existing workflow's active version into a new workflow in the same project. Returns: { workflowId, name }.",
+        inputSchema: { workflowId: z.string(), name: z.string().optional() },
         annotations: CREATE,
       },
-      async ({ name }) => stub({ workflowId: "44444444-4444-4444-4444-444444444444", name: name ?? "Copy of Sample Workflow" }),
+      async ({ workflowId, name }) => {
+        try {
+          const src = await api("GET", `/api/v1/workflows/${workflowId}`);
+          const def = src.workflow?.activeVersion?.definition;
+          if (!def) return result({ error: { code: "not_found", message: "Source workflow has no active version to copy." } });
+          const newName = name ?? `Copy of ${src.workflow?.name ?? "workflow"}`;
+          const created = { ...def, name: newName };
+          const r = await api("POST", "/api/v1/workflows", { body: { definition: created, name: newName } });
+          return result({ workflowId: r.workflow?.id, name: r.workflow?.name ?? newName });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -265,38 +431,52 @@ const baseHandler = createMcpHandler(
       {
         title: "Read workflow",
         description:
-          "Reads a workflow's active definition. When to use: ALWAYS read before editing so your patch targets the current state. Pick the smallest view: 'graph' (nodes/edges + metadata, no node code — start here), 'node' (one node's full content, requires nodeName), 'full' (entire definition). Returns the view plus _meta — pass _meta.versionId as expectedActiveVersionId in your next edit_workflow call.",
+          "Reads a workflow's active definition. ALWAYS read before editing. view: 'graph' (nodes/edges + metadata, no node code), 'node' (one node, needs nodeName), 'full' (entire definition). Returns the view plus _meta — pass _meta.versionId as expectedActiveVersionId to edit_workflow.",
         inputSchema: {
           workflowId: z.string(),
-          view: z.enum(["graph", "node", "full"]).describe("graph | node | full"),
+          view: z.enum(["graph", "node", "full"]),
           nodeName: z.string().describe("Required when view='node'.").optional(),
         },
         annotations: RO,
       },
       async ({ workflowId, view, nodeName }) => {
-        const meta = {
-          workflowId,
-          versionId: VERSION_ID,
-          versionNumber: 1,
-          status: "development",
-          apiEnabled: false,
-          apiUrlSlug: null,
-        };
-        if (view === "node") {
-          if (!nodeName) return stub({ error: { code: "bad_request", message: "nodeName is required when view='node'." } });
-          const node = SAMPLE_DEFINITION.nodes.find((n) => n.name === nodeName);
-          return node
-            ? stub({ _meta: meta, node })
-            : stub({ error: { code: "not_found", message: `No node named "${nodeName}".` } });
+        try {
+          const r = await api("GET", `/api/v1/workflows/${workflowId}`);
+          const w = r.workflow;
+          if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
+          const def = w.activeVersion?.definition ?? null;
+          const meta = {
+            workflowId: w.id,
+            versionId: w.activeVersionId ?? null,
+            versionNumber: w.activeVersion?.versionNumber ?? null,
+            status: w.lifecycle,
+            apiEnabled: w.apiEnabled,
+            apiUrlSlug: w.apiUrlSlug ?? null,
+          };
+          if (!def) return result({ _meta: meta, definition: null, note: "Workflow has no active version yet." });
+          if (view === "node") {
+            if (!nodeName) return result({ error: { code: "bad_request", message: "nodeName is required when view='node'." } });
+            const node = (def.nodes ?? []).find((n: any) => n.name === nodeName);
+            return node ? result({ _meta: meta, node }) : result({ error: { code: "not_found", message: `No node named "${nodeName}".` } });
+          }
+          if (view === "full") return result({ _meta: meta, definition: def });
+          // graph: strip per-node code/execute, keep routing-critical fields
+          const nodes = (def.nodes ?? []).map((n: any) => ({
+            name: n.name, type: n.type, position: n.position,
+            ...(n.mode ? { mode: n.mode } : {}),
+            ...(n.expression ? { expression: n.expression } : {}),
+            ...(n.extractorId ? { extractorId: n.extractorId } : {}),
+            ...(n.instructions ? { instructions: n.instructions } : {}),
+          }));
+          return result({
+            _meta: meta,
+            name: def.name, description: def.description, settings: def.settings,
+            inputSchema: def.inputSchema, outputSchema: def.outputSchema,
+            nodes, edges: def.edges ?? [],
+          });
+        } catch (e) {
+          return fail(e);
         }
-        if (view === "full") return stub({ _meta: meta, definition: SAMPLE_DEFINITION });
-        return stub({
-          _meta: meta,
-          name: SAMPLE_DEFINITION.name,
-          settings: SAMPLE_DEFINITION.settings,
-          nodes: SAMPLE_DEFINITION.nodes.map((n) => ({ name: n.name, type: n.type, position: n.position })),
-          edges: SAMPLE_DEFINITION.edges,
-        });
       },
     );
 
@@ -305,139 +485,154 @@ const baseHandler = createMcpHandler(
       {
         title: "Update workflow settings",
         description:
-          "Updates a workflow's metadata, lifecycle status, and API-trigger config — NOT its graph (use edit_workflow for the graph). When to use: to rename, change description, publish/disable, or toggle API triggering. status='active' requires a published version; status='disabled' auto-pauses the workflow's schedules. Returns the updated { workflowId, name, description, status, apiEnabled, apiUrlSlug }.",
+          "Updates lifecycle status and API-trigger config. status: preview | active | disabled (activating needs a published version). NOTE: name/description editing and status='development' are not yet supported by the API. Returns the updated { workflowId, name, status, apiEnabled, apiUrlSlug }.",
         inputSchema: {
           workflowId: z.string(),
           name: z.string().optional(),
           description: z.string().optional(),
           status: WorkflowStatus.optional(),
-          apiEnabled: z.boolean().describe("Whether the workflow can be triggered via its API URL.").optional(),
-          apiUrlSlug: z.string().describe("Unique slug for the API trigger URL.").optional(),
+          apiEnabled: z.boolean().optional(),
+          apiUrlSlug: z.string().optional(),
         },
         annotations: UPSERT,
       },
-      async ({ workflowId, name, description, status, apiEnabled, apiUrlSlug }) =>
-        stub({
-          workflowId,
-          name: name ?? "Sample Workflow",
-          description: description ?? "A stub workflow.",
-          status: status ?? "development",
-          apiEnabled: apiEnabled ?? false,
-          apiUrlSlug: apiUrlSlug ?? null,
-        }),
+      async ({ workflowId, name, description, status, apiEnabled, apiUrlSlug }) => {
+        if (name !== undefined || description !== undefined)
+          return comingSoon("editing a workflow's name/description via update_workflow — the v1 API PATCH only accepts status/apiEnabled/apiUrlSlug.");
+        if (status === "development")
+          return comingSoon("setting status back to 'development' — the v1 API PATCH only allows preview/active/disabled.");
+        if (status === undefined && apiEnabled === undefined && apiUrlSlug === undefined)
+          return result({ error: { code: "bad_request", message: "Provide at least one of status, apiEnabled, apiUrlSlug." } });
+        try {
+          const r = await api("PATCH", `/api/v1/workflows/${workflowId}`, { body: { status, apiEnabled, apiUrlSlug } });
+          return result(mapWorkflow(r.workflow));
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
       "delete_workflow",
       {
         title: "Delete workflow",
-        description:
-          "Soft-deletes a workflow and cascades to its sessions, schedules, and event channels. When to use: to remove a workflow the user no longer needs — confirm intent first. Returns: { success: true }.",
+        description: "Soft-deletes a workflow (cascades to sessions, schedules, channels). Returns: { success: true }.",
         inputSchema: { workflowId: z.string() },
         annotations: REMOVE,
       },
-      async () => stub({ success: true }),
+      async ({ workflowId }) => {
+        try {
+          const r = await api("DELETE", `/api/v1/workflows/${workflowId}`);
+          return result({ success: r.deleted === true, workflowId });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
-    // ---- Editing --------------------------------------------------------
+    // ---- Editing ----
     server.registerTool(
       "edit_workflow",
       {
         title: "Edit workflow",
         description:
-          "Applies a composite patch to a workflow's graph and auto-saves a new version. This is the primary way to build or modify a workflow. Workflow: read_workflow('graph') first, then send only what changes in `patch` (add/update/remove nodes and edges; top-level fields like settings/inputSchema). The patch is validated against the schema — on success you get a new version, on failure an `issues[]` list to fix and retry. Pass expectedActiveVersionId (from read_workflow's _meta) to avoid clobbering concurrent edits. Returns: { ok, versionId, versionNumber, deduped } or { error: { code, message, issues } }.",
+          "Applies a composite patch to a workflow's graph and saves a new version. Read the graph first, then send only what changes in `patch`. Validated server-side; on success a new version, on failure an error. Pass expectedActiveVersionId (from read_workflow's _meta) to avoid clobbering concurrent edits. Returns: { ok, versionId, versionNumber, deduped } or { error }.",
         inputSchema: {
           workflowId: z.string(),
           patch: WorkflowPatchInput,
-          expectedActiveVersionId: z
-            .string()
-            .describe("Optimistic-concurrency token from read_workflow's _meta.versionId; rejects with version_conflict if stale.")
-            .optional(),
+          expectedActiveVersionId: z.string().describe("From read_workflow's _meta.versionId.").optional(),
         },
         annotations: CREATE,
       },
-      async () => stub({ ok: true, versionId: VERSION_ID, versionNumber: 2, deduped: false }),
+      async ({ workflowId, patch, expectedActiveVersionId }) => {
+        try {
+          const cur = await api("GET", `/api/v1/workflows/${workflowId}`);
+          const w = cur.workflow;
+          if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
+          const current = w.activeVersion?.definition;
+          if (!current) return result({ error: { code: "bad_request", message: "Workflow has no version to edit. Create one first." } });
+          let next: any;
+          try {
+            next = applyWorkflowPatch(current, patch);
+          } catch (patchErr) {
+            return result({ error: { code: "validation_failed", message: patchErr instanceof Error ? patchErr.message : String(patchErr) } });
+          }
+          const r = await api("PUT", `/api/v1/workflows/${workflowId}`, {
+            body: { definition: next, name: next.name, expectedActiveVersionId: expectedActiveVersionId ?? w.activeVersionId },
+          });
+          return result({ ok: true, versionId: r.version?.id, versionNumber: r.version?.versionNumber, deduped: r.version?.deduped ?? false });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
-    // ---- Versions -------------------------------------------------------
+    // ---- Versions ----
     server.registerTool(
       "list_versions",
       {
         title: "List versions",
-        description:
-          "Lists a workflow's saved versions, newest first. When to use: to review history or find a version to inspect or revert to. Returns: a page of { versionId, versionNumber, name, source, author, createdAt, isActive } plus nextCursor and activeVersionId.",
-        inputSchema: {
-          workflowId: z.string(),
-          named: z.boolean().describe("Only versions with a user-given name.").optional(),
-          source: z.string().describe("Filter by source (manual_save, agent, import, revert, clone).").optional(),
-          limit,
-          cursor,
-        },
+        description: "Lists a workflow's saved versions, newest first. Returns: { items: [{ versionId, versionNumber, name, source, createdAt }], nextCursor, activeVersionId }.",
+        inputSchema: { workflowId: z.string(), limit, cursor },
         annotations: RO,
       },
-      async () =>
-        stub({
-          items: [
-            { versionId: VERSION_ID, versionNumber: 1, name: null, source: "manual_save", author: "stub", createdAt: now(), isActive: true },
-          ],
-          nextCursor: null,
-          activeVersionId: VERSION_ID,
-        }),
+      async ({ workflowId, limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", `/api/v1/workflows/${workflowId}/versions`, { query: { page, pageSize: lim ?? 25 } });
+          const items = (r.versions ?? []).map((v: any) => ({
+            versionId: v.id, versionNumber: v.versionNumber, name: v.name ?? null, source: v.source ?? null, createdAt: v.createdAt,
+          }));
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
       "get_version",
       {
         title: "Get version",
-        description:
-          "Returns a single saved version including its full definition. When to use: to inspect or diff a specific version. Returns: { versionId, versionNumber, name, source, createdAt, definition }.",
+        description: "Returns a single saved version including its full definition.",
         inputSchema: { workflowId: z.string(), versionId: z.string() },
         annotations: RO,
       },
-      async ({ versionId }) =>
-        stub({ versionId, versionNumber: 1, name: null, source: "manual_save", createdAt: now(), definition: SAMPLE_DEFINITION }),
+      async () => comingSoon("single-version retrieval — the v1 API has no GET /workflows/{id}/versions/{versionId} (the version list omits definitions)."),
     );
 
     server.registerTool(
       "revert_to_version",
       {
         title: "Revert to version",
-        description:
-          "Reverts a workflow to an earlier version by appending that definition as a new version (non-destructive — history is preserved). When to use: to roll back a bad change. Returns: { versionId, versionNumber, revertedFromVersionNumber }.",
-        inputSchema: {
-          workflowId: z.string(),
-          versionId: z.string().describe("The version to revert to."),
-          expectedActiveVersionId: z.string().optional(),
-        },
+        description: "Reverts a workflow to an earlier version by appending it as a new version.",
+        inputSchema: { workflowId: z.string(), versionId: z.string(), expectedActiveVersionId: z.string().optional() },
         annotations: CREATE,
       },
-      async () => stub({ versionId: "55555555-5555-5555-5555-555555555555", versionNumber: 3, revertedFromVersionNumber: 1 }),
+      async () => comingSoon("version revert — depends on single-version retrieval (get_version), which the v1 API does not expose yet."),
     );
 
-    // ---- Schedules ------------------------------------------------------
+    // ---- Schedules ----
     server.registerTool(
       "list_schedules",
       {
         title: "List schedules",
-        description:
-          "Lists the schedules attached to a workflow, each with its most-recent run summary. When to use: to review or manage recurring runs. Returns: items of { scheduleId, name, recurrenceRule, startAt, timezone, enabled, lastSession }.",
+        description: "Lists the schedules attached to a workflow. Returns: { items: [{ scheduleId, name, recurrenceRule, startAt, status, nextFireAt, inputResourceName }] }.",
         inputSchema: { workflowId: z.string() },
         annotations: RO,
       },
-      async () =>
-        stub({
-          items: [
-            {
-              scheduleId: "66666666-6666-6666-6666-666666666666",
-              name: "Daily",
-              recurrenceRule: "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
-              startAt: now(),
-              timezone: "UTC",
-              enabled: true,
-              lastSession: { id: SESSION_ID, status: "completed", createdAt: now(), durationMs: 4200, errorMessage: null },
-            },
-          ],
-        }),
+      async ({ workflowId }) => {
+        try {
+          const r = await api("GET", `/api/v1/workflows/${workflowId}/schedules`);
+          const items = (r.schedules ?? []).map((s: any) => ({
+            scheduleId: s.id, name: s.name ?? null, recurrenceRule: s.recurrenceRule, startAt: s.startAt ?? null,
+            status: s.status, nextFireAt: s.nextFireAt ?? null, inputResourceName: s.inputResourceName ?? null,
+          }));
+          return result({ items });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -445,27 +640,35 @@ const baseHandler = createMcpHandler(
       {
         title: "Create schedule",
         description:
-          "Creates a recurring schedule for a workflow using an RFC 5545 recurrence rule (e.g. 'FREQ=DAILY;BYHOUR=9'). When to use: to run a workflow on a cadence. Run input comes from a linked project resource via inputResourceName (create it with set_resource first if needed); it is validated against the workflow's input schema. Returns: { scheduleId }.",
+          "Creates a recurring schedule using an RFC 5545 recurrence rule (e.g. 'FREQ=DAILY;BYHOUR=9'). Run input comes from a linked project resource (inputResourceName). Returns: { scheduleId }. (timezone/enabled on create are not supported by the API yet.)",
         inputSchema: {
           workflowId: z.string(),
-          recurrenceRule: z.string().describe("RFC 5545 RRULE, e.g. 'FREQ=DAILY;BYHOUR=9'."),
+          recurrenceRule: z.string().describe("RFC 5545 RRULE."),
           name: z.string().optional(),
-          startAt: z.string().describe("ISO 8601 datetime for the first occurrence.").optional(),
-          timezone: z.string().describe("IANA timezone, e.g. 'America/New_York'.").optional(),
+          startAt: z.string().describe("ISO 8601 datetime.").optional(),
+          timezone: z.string().optional(),
           enabled: z.boolean().optional(),
-          inputResourceName: z.string().describe("Name of a project resource providing run input.").optional(),
+          inputResourceName: z.string().optional(),
         },
         annotations: CREATE,
       },
-      async () => stub({ scheduleId: "66666666-6666-6666-6666-666666666666" }),
+      async ({ workflowId, recurrenceRule, name, startAt, inputResourceName }) => {
+        try {
+          const r = await api("POST", `/api/v1/workflows/${workflowId}/schedules`, {
+            body: { name: name ?? null, recurrence_rule: recurrenceRule, start_at: startAt, input_resource_name: inputResourceName ?? null },
+          });
+          return result({ scheduleId: r.schedule?.id });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
       "update_schedule",
       {
         title: "Update schedule",
-        description:
-          "Updates a schedule. When to use: to change its cadence, input, or to pause/resume it (set `enabled`). Returns: { scheduleId }.",
+        description: "Updates a schedule. Set `enabled` to pause/resume (maps to status active/paused). Returns: { scheduleId }.",
         inputSchema: {
           workflowId: z.string(),
           scheduleId: z.string(),
@@ -473,12 +676,25 @@ const baseHandler = createMcpHandler(
           name: z.string().optional(),
           startAt: z.string().optional(),
           timezone: z.string().optional(),
-          enabled: z.boolean().describe("Set false to pause, true to resume.").optional(),
+          enabled: z.boolean().optional(),
           inputResourceName: z.string().optional(),
         },
         annotations: UPSERT,
       },
-      async ({ scheduleId }) => stub({ scheduleId }),
+      async ({ workflowId, scheduleId, recurrenceRule, name, startAt, enabled, inputResourceName }) => {
+        try {
+          const body: Record<string, unknown> = {};
+          if (name !== undefined) body.name = name;
+          if (recurrenceRule !== undefined) body.recurrence_rule = recurrenceRule;
+          if (startAt !== undefined) body.start_at = startAt;
+          if (inputResourceName !== undefined) body.input_resource_name = inputResourceName;
+          if (enabled !== undefined) body.status = enabled ? "active" : "paused";
+          const r = await api("PATCH", `/api/v1/workflows/${workflowId}/schedules/${scheduleId}`, { body });
+          return result({ scheduleId: r.schedule?.id ?? scheduleId });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -489,47 +705,63 @@ const baseHandler = createMcpHandler(
         inputSchema: { workflowId: z.string(), scheduleId: z.string() },
         annotations: REMOVE,
       },
-      async () => stub({ success: true }),
+      async ({ workflowId, scheduleId }) => {
+        try {
+          const r = await api("DELETE", `/api/v1/workflows/${workflowId}/schedules/${scheduleId}`);
+          return result({ success: r.success === true, scheduleId });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
-    // ---- Runs -----------------------------------------------------------
+    // ---- Runs ----
     server.registerTool(
       "run_workflow",
       {
         title: "Run workflow",
         description:
-          "Triggers a run of a workflow's active version. When to use: to execute an automation now. `input` is validated against the workflow's input schema; fails if the workflow is disabled or has no active version. This launches real browser automation against external systems. Returns: { sessionId, status: 'queued' } — poll get_run for progress and results.",
+          "Triggers a run of the workflow's active version. `input` is validated against the workflow's input schema. (The environment is chosen server-side.) Returns: { sessionId, status: 'queued' } — poll get_run.",
         inputSchema: {
           workflowId: z.string(),
-          input: z.record(z.string(), z.unknown()).describe("Run input; validated against the workflow's inputSchema.").optional(),
-          environment: Environment.describe("Execution environment. Defaults to production.").optional(),
+          input: z.record(z.string(), z.unknown()).optional(),
+          environment: Environment.optional(),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async () => stub({ sessionId: SESSION_ID, status: "queued" }),
+      async ({ workflowId, input }) => {
+        try {
+          const r = await api("POST", `/api/v1/workflows/${workflowId}/run`, { body: input ?? {} });
+          return result({ sessionId: r.sessionId, status: r.status ?? "queued" });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
       "list_runs",
       {
         title: "List runs",
-        description:
-          "Lists recent runs (sessions), newest first, optionally filtered by workflow and status. When to use: to find a run to inspect. Returns: items of { sessionId, workflowId, status, source, startedAt, endedAt, durationMs } plus nextCursor.",
-        inputSchema: {
-          workflowId: z.string().optional(),
-          status: RunStatus.optional(),
-          limit,
-          cursor,
-        },
+        description: "Lists recent runs (sessions), newest first, optionally filtered by workflow and status. Returns: { items: [{ sessionId, workflowId, status, source, startedAt, endedAt, durationMs }], nextCursor }.",
+        inputSchema: { workflowId: z.string().optional(), status: RunStatus.optional(), limit, cursor },
         annotations: RO,
       },
-      async () =>
-        stub({
-          items: [
-            { sessionId: SESSION_ID, workflowId: WF_ID, status: "completed", source: "api", startedAt: now(), endedAt: now(), durationMs: 4200 },
-          ],
-          nextCursor: null,
-        }),
+      async ({ workflowId, status, limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", "/api/v1/sessions", { query: { workflowId, page, pageSize: lim ?? 25 } });
+          let items = (r.sessions ?? []).map((s: any) => ({
+            sessionId: s.id, workflowId: s.workflowId, status: s.status, source: s.source ?? null,
+            startedAt: s.startedAt ?? null, endedAt: s.endedAt ?? null,
+            durationMs: s.durationSeconds != null ? Math.round(s.durationSeconds * 1000) : null,
+          }));
+          if (status) items = items.filter((s: any) => s.status === status);
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -537,43 +769,40 @@ const baseHandler = createMcpHandler(
       {
         title: "Get run",
         description:
-          "Returns a run's status and result; add `include` for deeper data when debugging. When to use: to check progress, get output, or debug a failure. include options: 'timeline' (per-node status + timing), 'io' (per-node input/output — may be large), 'logs' (paginated), 'recording' (browser video URL). Omit include for a lightweight summary. Returns the run summary plus any requested sections.",
+          "Returns a run's status and result; add `include` for deeper data. include: 'timeline' (per-node status+timing), 'io' (per-node input/output). NOTE: 'logs' and 'recording' are not yet exposed by the API.",
         inputSchema: {
           sessionId: z.string(),
-          include: z
-            .array(z.enum(["timeline", "io", "logs", "recording"]))
-            .describe("Opt-in deep data. Omit for a lightweight summary.")
-            .optional(),
-          logsCursor: z.string().describe("Pagination cursor for logs.").optional(),
+          include: z.array(z.enum(["timeline", "io", "logs", "recording"])).optional(),
+          logsCursor: z.string().optional(),
         },
         annotations: RO,
       },
       async ({ sessionId, include }) => {
-        const inc = new Set(include ?? []);
-        const base: Record<string, unknown> = {
-          sessionId,
-          workflowId: WF_ID,
-          versionId: VERSION_ID,
-          status: "completed",
-          source: "api",
-          input: { example: "input" },
-          output: { ok: true },
-          outputSchemaValid: true,
-          startedAt: now(),
-          endedAt: now(),
-          durationMs: 4200,
-        };
-        if (inc.has("timeline"))
-          base.timeline = [
-            { name: "Start", type: "start", status: "completed", startedAt: now(), endedAt: now(), durationMs: 5 },
-            { name: "DoWork", type: "block", status: "completed", startedAt: now(), endedAt: now(), durationMs: 4100 },
-            { name: "End", type: "end", status: "completed", startedAt: now(), endedAt: now(), durationMs: 5 },
-          ];
-        if (inc.has("io")) base.nodeIO = [{ name: "DoWork", input: { mode: "code" }, output: { ok: true } }];
-        if (inc.has("logs"))
-          base.logs = { entries: [{ ts: now(), level: "info", nodeName: "DoWork", message: "hello" }], nextCursor: null };
-        if (inc.has("recording")) base.recordingUrl = "https://example.invalid/recordings/stub.mp4";
-        return stub(base);
+        try {
+          const inc = new Set(include ?? []);
+          const r = await api("GET", `/api/v1/sessions/${sessionId}`);
+          const s = r.session;
+          if (!s) return result({ error: { code: "not_found", message: "Run not found." } });
+          const out: Record<string, unknown> = {
+            sessionId: s.id, workflowId: s.workflowId, versionId: s.workflowVersionId ?? null,
+            status: s.status, source: s.source ?? null, input: s.inputData ?? null, output: s.outputData ?? null,
+            startedAt: s.startedAt ?? null, endedAt: s.endedAt ?? null,
+            durationMs: s.durationSeconds != null ? Math.round(s.durationSeconds * 1000) : null,
+          };
+          if (inc.has("timeline") || inc.has("io")) {
+            const n = await api("GET", `/api/v1/sessions/${sessionId}/nodes`);
+            const nodes = n.nodes ?? [];
+            if (inc.has("timeline"))
+              out.timeline = nodes.map((nd: any) => ({ name: nd.name, type: nd.type, status: nd.status, startedAt: nd.startedAt, endedAt: nd.endedAt, durationMs: durMs(nd.startedAt, nd.endedAt) }));
+            if (inc.has("io"))
+              out.nodeIO = nodes.map((nd: any) => ({ name: nd.name, input: nd.inputData ?? null, output: nd.outputData ?? null }));
+          }
+          if (inc.has("logs") || inc.has("recording"))
+            out.note = "Coming soon: logs and recording are not yet exposed by the API.";
+          return result(out);
+        } catch (e) {
+          return fail(e);
+        }
       },
     );
 
@@ -581,105 +810,88 @@ const baseHandler = createMcpHandler(
       "cancel_run",
       {
         title: "Cancel run",
-        description: "Cancels an in-progress run. When to use: to stop a run that is no longer needed. Returns: { success: true, status: 'canceled' }.",
+        description: "Cancels an in-progress run. Returns: { success: true, status: 'canceled' }.",
         inputSchema: { sessionId: z.string() },
         annotations: UPSERT,
       },
-      async () => stub({ success: true, status: "canceled" }),
+      async ({ sessionId }) => {
+        try {
+          const r = await api("POST", `/api/v1/sessions/${sessionId}/stop`);
+          return result({ success: true, status: r.status ?? "canceled", sessionId });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
-    // ---- Human-in-the-loop ----------------------------------------------
+    // ---- HITL (not in v1 API yet) ----
     server.registerTool(
       "list_hitl_tasks",
       {
         title: "List human-in-the-loop tasks",
-        description:
-          "Lists human-in-the-loop tasks — approvals or inputs that have paused a run waiting for a person. When to use: to find tasks that need a decision. Returns: items of { taskId, sessionId, workflowId, nodeName, prompt, actions, isApproval, fields, status, expiresAt } plus nextCursor.",
-        inputSchema: {
-          sessionId: z.string().describe("Filter to one run's tasks.").optional(),
-          status: z.enum(["pending", "completed", "expired"]).optional(),
-          limit,
-          cursor,
-        },
+        description: "Lists human-in-the-loop tasks (approvals/inputs that pause a run).",
+        inputSchema: { sessionId: z.string().optional(), status: z.enum(["pending", "completed", "expired"]).optional(), limit, cursor },
         annotations: RO,
       },
-      async () =>
-        stub({
-          items: [
-            {
-              taskId: "77777777-7777-7777-7777-777777777777",
-              sessionId: SESSION_ID,
-              workflowId: WF_ID,
-              nodeName: "Approve",
-              prompt: "Approve this action?",
-              actions: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }],
-              isApproval: true,
-              fields: [],
-              status: "pending",
-              createdAt: now(),
-              expiresAt: now(),
-            },
-          ],
-          nextCursor: null,
-        }),
+      async () => comingSoon("HITL task listing — the v1 API does not expose /hitl yet (only the internal /api/projects surface)."),
     );
 
     server.registerTool(
       "complete_hitl_task",
       {
         title: "Complete human-in-the-loop task",
-        description:
-          "Submits a human decision to resume a paused run. When to use: to answer a pending HITL task. `action` must be one of the task's action ids; `fields` supplies any requested values. Returns: { success: true }.",
-        inputSchema: {
-          taskId: z.string(),
-          action: z.string().describe("One of the task's action ids."),
-          fields: z.record(z.string(), z.unknown()).describe("Values for any fields the task requested.").optional(),
-        },
+        description: "Submits a human decision to resume a paused run.",
+        inputSchema: { taskId: z.string(), action: z.string(), fields: z.record(z.string(), z.unknown()).optional() },
         annotations: CREATE,
       },
-      async () => stub({ success: true }),
+      async () => comingSoon("HITL task completion — the v1 API does not expose /hitl yet (only the internal /api/projects surface)."),
     );
 
-    // ---- Secrets (project-scoped; values never returned) ----------------
+    // ---- Secrets ----
     server.registerTool(
       "list_secrets",
       {
         title: "List secrets",
-        description:
-          "Lists the project's secret keys and metadata. Values are NEVER returned. When to use: to see which secrets exist before referencing them in a workflow. Returns: items of { key, description, updatedAt } plus nextCursor.",
-        inputSchema: { limit, cursor },
+        description: "Lists the project's secret names and metadata (values are never returned). Returns: { items: [{ key, last4, lifecycle, updatedAt }], nextCursor }.",
+        inputSchema: { lifecycle: Lifecycle.optional(), limit, cursor },
         annotations: RO,
       },
-      async () =>
-        stub({
-          items: [
-            { key: "API_TOKEN", description: "Third-party API token", updatedAt: now() },
-            { key: "DB_PASSWORD", description: null, updatedAt: now() },
-          ],
-          nextCursor: null,
-        }),
+      async ({ lifecycle, limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", "/api/v1/secrets", { query: { lifecycle, page, pageSize: lim ?? 25 } });
+          const items = (r.secrets ?? []).map((s: any) => ({ key: s.name, last4: s.last4 ?? null, lifecycle: s.lifecycle ?? null, updatedAt: s.updatedAt }));
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
       "set_secrets",
       {
         title: "Set secrets",
-        description:
-          "Creates or updates one or more project secrets (upsert). Values are write-only and never echoed back. When to use: to store credentials a workflow needs. Returns: { updated: [keys] }.",
+        description: "Creates or updates one or more project secrets (upsert by key). Values are write-only. Returns: { updated: [keys] }.",
         inputSchema: {
-          secrets: z
-            .array(
-              z.object({
-                key: z.string(),
-                value: z.string().describe("Secret value (write-only)."),
-                description: z.string().optional(),
-              }),
-            )
-            .min(1),
+          secrets: z.array(z.object({ key: z.string(), value: z.string(), description: z.string().optional(), lifecycle: Lifecycle.optional() })).min(1),
         },
         annotations: UPSERT,
       },
-      async ({ secrets }) => stub({ updated: secrets.map((s) => s.key) }),
+      async ({ secrets }) => {
+        try {
+          const updated: string[] = [];
+          for (const s of secrets) {
+            const id = await findSecretId(s.key);
+            if (id) await api("PUT", `/api/v1/secrets/${id}`, { body: { value: s.value, lifecycle: s.lifecycle } });
+            else await api("POST", "/api/v1/secrets", { body: { name: s.key, value: s.value, lifecycle: s.lifecycle } });
+            updated.push(s.key);
+          }
+          return result({ updated });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -690,118 +902,128 @@ const baseHandler = createMcpHandler(
         inputSchema: { key: z.string() },
         annotations: REMOVE,
       },
-      async () => stub({ success: true }),
+      async ({ key }) => {
+        try {
+          const id = await findSecretId(key);
+          if (!id) return result({ error: { code: "not_found", message: `No secret named "${key}".` } });
+          await api("DELETE", `/api/v1/secrets/${id}`);
+          return result({ success: true, key });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
-    // ---- Resources ------------------------------------------------------
+    // ---- Resources ----
     server.registerTool(
       "list_resources",
       {
         title: "List resources",
-        description:
-          "Lists project resources (data and file) by name and metadata; values are not returned. When to use: to discover resources referenced by block/document nodes or schedule inputs. Returns: items of { name, kind, description, updatedAt } plus nextCursor.",
-        inputSchema: {
-          kind: z.enum(["data", "file"]).optional(),
-          search: z.string().optional(),
-          limit,
-          cursor,
-        },
+        description: "Lists project data resources by name and metadata. Returns: { items: [{ name, kind, description, lifecycle, updatedAt }], nextCursor }.",
+        inputSchema: { lifecycle: Lifecycle.optional(), search: z.string().optional(), limit, cursor },
         annotations: RO,
       },
-      async () =>
-        stub({
-          items: [
-            { name: "customer_list", kind: "data", description: "Seed customers", updatedAt: now() },
-            { name: "template.pdf", kind: "file", description: null, updatedAt: now() },
-          ],
-          nextCursor: null,
-        }),
+      async ({ lifecycle, search, limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", "/api/v1/resources", { query: { lifecycle, name: search, page, pageSize: lim ?? 25 } });
+          const items = (r.resources ?? []).map((x: any) => ({ name: x.name, kind: "data", description: x.description ?? null, lifecycle: x.lifecycle ?? null, updatedAt: x.updatedAt }));
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
       "get_resource",
       {
         title: "Get resource",
-        description:
-          "Returns a project resource by name. Data resources include their value; file resources include a download URL and metadata. Returns: the resource.",
-        inputSchema: { name: z.string() },
+        description: "Returns a project data resource by name (includes its value).",
+        inputSchema: { name: z.string(), lifecycle: Lifecycle.optional() },
         annotations: RO,
       },
-      async ({ name }) =>
-        stub({ name, kind: "data", value: { example: "data" }, description: "Seed customers", updatedAt: now() }),
+      async ({ name, lifecycle }) => {
+        try {
+          const x = await findResource(name, lifecycle);
+          if (!x) return result({ error: { code: "not_found", message: `No resource named "${name}".` } });
+          return result({ name: x.name, kind: "data", value: x.value, description: x.description ?? null, lifecycle: x.lifecycle ?? null, updatedAt: x.updatedAt });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
       "set_resource",
       {
         title: "Set resource",
-        description:
-          "Creates or updates a data (JSON) resource (upsert). When to use: to store input data a workflow or schedule reads by name. File-resource uploads are not yet supported. Returns: { name }.",
-        inputSchema: {
-          name: z.string(),
-          value: z.unknown().describe("JSON value for the data resource."),
-          description: z.string().optional(),
-        },
+        description: "Creates or updates a data (JSON) resource by name (upsert). Omitting lifecycle on create seeds all stages. Returns: { name }.",
+        inputSchema: { name: z.string(), value: z.unknown(), description: z.string().optional(), lifecycle: Lifecycle.optional() },
         annotations: UPSERT,
       },
-      async ({ name }) => stub({ name }),
+      async ({ name, value, description, lifecycle }) => {
+        try {
+          const existing = await findResource(name, lifecycle);
+          if (existing) await api("PUT", `/api/v1/resources/${existing.id}`, { body: { value, description } });
+          else await api("POST", "/api/v1/resources", { body: { name, value, description, lifecycle } });
+          return result({ name });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
       "delete_resource",
       {
         title: "Delete resource",
-        description: "Deletes a project resource by name. Returns: { success: true }.",
-        inputSchema: { name: z.string() },
+        description: "Deletes a project data resource by name. Returns: { success: true }.",
+        inputSchema: { name: z.string(), lifecycle: Lifecycle.optional() },
         annotations: REMOVE,
       },
-      async () => stub({ success: true }),
+      async ({ name, lifecycle }) => {
+        try {
+          const x = await findResource(name, lifecycle);
+          if (!x) return result({ error: { code: "not_found", message: `No resource named "${name}".` } });
+          await api("DELETE", `/api/v1/resources/${x.id}`);
+          return result({ success: true, name });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
-    // ---- Extractors -----------------------------------------------------
+    // ---- Extractors (not in v1 API yet) ----
     server.registerTool(
       "list_extractors",
       {
         title: "List extractors",
-        description:
-          "Lists the document extractors available in the project. When to use: to find an extractorId for a `document` node. Returns: items of { extractorId, name, activeVersionId, description } plus nextCursor.",
+        description: "Lists the document extractors available in the project (for document nodes).",
         inputSchema: { search: z.string().optional(), limit, cursor },
         annotations: RO,
       },
-      async () =>
-        stub({
-          items: [
-            { extractorId: "88888888-8888-8888-8888-888888888888", name: "Invoice Extractor", activeVersionId: "99999999-9999-9999-9999-999999999999", description: "Extracts invoice fields" },
-          ],
-          nextCursor: null,
-        }),
+      async () => comingSoon("extractor listing — the v1 API does not expose /extractors yet (only the internal /api/projects surface)."),
     );
 
     server.registerTool(
       "get_extractor",
       {
         title: "Get extractor",
-        description:
-          "Returns a document extractor. view='summary' gives name + fields overview + active version; view='full' gives the entire definition. When to use: to inspect an extractor before referencing it in a document node. Authoring extractors is not yet supported.",
+        description: "Returns a document extractor.",
         inputSchema: { extractorId: z.string(), view: z.enum(["summary", "full"]).optional() },
         annotations: RO,
       },
-      async ({ extractorId, view }) =>
-        stub({
-          extractorId,
-          name: "Invoice Extractor",
-          activeVersionId: "99999999-9999-9999-9999-999999999999",
-          fields: view === "full" ? [{ name: "total", type: "number" }, { name: "vendor", type: "string" }] : ["total", "vendor"],
-        }),
+      async () => comingSoon("extractor retrieval — the v1 API does not expose /extractors yet (only the internal /api/projects surface)."),
     );
   },
   {
-    serverInfo: { name: "automat-robotic-workflows", version: "0.3.0" },
+    serverInfo: { name: "automat-robotic-workflows", version: "0.4.0" },
     instructions:
-      "Build, run, and manage Automat RPA workflows in one project (the API key is scoped to a single project, so no tool takes a project id).\n\n" +
-      "Build loop: call get_workflow_schema for the node/edge shape, read_workflow(view:'graph') to see the current graph, then edit_workflow with a small patch — it validates and auto-saves a version; if it returns issues, fix them and retry. Run with run_workflow and inspect with get_run(include:['timeline','logs']).\n\n" +
-      "Model: a workflow has an immutable version per edit; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). document nodes need an extractorId (list_extractors); schedules and some inputs reference project resources by name (list_resources/set_resource). Secrets are write-only (values never returned).\n\n" +
-      "NOTE: tools currently return placeholder data marked _stub:true until the studio backend is connected.",
+      "Build, run, and manage Automat RPA workflows in one project (the API key resolves the project; no project id is needed).\n\n" +
+      "Build loop: get_workflow_schema for the node/edge shape, read_workflow(view:'graph') to see the current graph, then edit_workflow with a small patch (validates and saves a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
+      "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules and a linked project resource for input. Secrets are write-only.\n\n" +
+      "Some tools return { coming_soon: true } until the backend exposes them (get_version, revert_to_version, HITL, extractors, and get_run logs/recording).",
   },
   { basePath: "/api", maxDuration: 60, verboseLogs: true },
 );
@@ -810,6 +1032,12 @@ const baseHandler = createMcpHandler(
 // Auth-wrapped handler exports
 // ---------------------------------------------------------------------------
 const authed = async (req: Request): Promise<Response> => {
+  if (!MCP_API_KEY) {
+    return new Response(JSON.stringify({ error: "server_misconfigured", message: "MCP_API_KEY is not set" }), {
+      status: 500,
+      headers: { "content-type": "application/json", ...corsHeaders },
+    });
+  }
   if (extractKey(req) !== MCP_API_KEY) {
     return new Response(JSON.stringify({ error: "unauthorized" }), {
       status: 401,
