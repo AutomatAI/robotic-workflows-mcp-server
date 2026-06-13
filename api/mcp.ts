@@ -662,19 +662,18 @@ const baseHandler = createMcpHandler(
       {
         title: "Create schedule",
         description:
-          "Creates a recurring schedule using an RFC 5545 recurrence rule (e.g. 'FREQ=DAILY;BYHOUR=9'). Run input comes from a linked project resource (inputResourceName). Set enabled:false to create it paused. Returns: { scheduleId }. (Note: the platform is UTC-only; timezone is accepted but not yet honored.)",
+          "Creates a recurring schedule using an RFC 5545 recurrence rule (e.g. 'FREQ=DAILY;BYHOUR=9'). All schedules run in UTC — express times in UTC. Run input comes from a linked project resource (inputResourceName). Set enabled:false to create it paused. Returns: { scheduleId }.",
         inputSchema: {
           workflowId: z.string(),
-          recurrenceRule: z.string().describe("RFC 5545 RRULE."),
+          recurrenceRule: z.string().describe("RFC 5545 RRULE, evaluated in UTC."),
           name: z.string().optional(),
-          startAt: z.string().describe("ISO 8601 datetime.").optional(),
-          timezone: z.string().describe("Accepted but not yet honored (platform is UTC-only).").optional(),
+          startAt: z.string().describe("ISO 8601 datetime (UTC).").optional(),
           enabled: z.boolean().optional(),
           inputResourceName: z.string().optional(),
         },
         annotations: CREATE,
       },
-      async ({ workflowId, recurrenceRule, name, startAt, timezone, enabled, inputResourceName }) => {
+      async ({ workflowId, recurrenceRule, name, startAt, enabled, inputResourceName }) => {
         try {
           const body: Record<string, unknown> = {
             name: name ?? null,
@@ -682,7 +681,6 @@ const baseHandler = createMcpHandler(
             start_at: startAt,
             input_resource_name: inputResourceName ?? null,
           };
-          if (timezone !== undefined) body.timezone = timezone;
           if (enabled !== undefined) body.status = enabled ? "active" : "paused";
           const r = await api("POST", `/api/agent/workflows/${workflowId}/schedules`, { body });
           return result({ scheduleId: r.schedule?.id });
@@ -696,14 +694,13 @@ const baseHandler = createMcpHandler(
       "update_schedule",
       {
         title: "Update schedule",
-        description: "Updates a schedule. Set `enabled` to pause/resume (maps to status active/paused). Returns: { scheduleId }.",
+        description: "Updates a schedule (all schedules run in UTC). Set `enabled` to pause/resume (maps to status active/paused). Returns: { scheduleId }.",
         inputSchema: {
           workflowId: z.string(),
           scheduleId: z.string(),
-          recurrenceRule: z.string().optional(),
+          recurrenceRule: z.string().describe("RFC 5545 RRULE, evaluated in UTC.").optional(),
           name: z.string().optional(),
-          startAt: z.string().optional(),
-          timezone: z.string().optional(),
+          startAt: z.string().describe("ISO 8601 datetime (UTC).").optional(),
           enabled: z.boolean().optional(),
           inputResourceName: z.string().optional(),
         },
