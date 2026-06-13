@@ -1,10 +1,42 @@
 # Robotic Workflows MCP Server
 
-A remote [MCP](https://modelcontextprotocol.io/) server that lets AI agents build, run, and manage RPA workflows, powered by Automat AI (https://runautomat.com/).
+**Claude Build Day submission.** A remote [MCP](https://modelcontextprotocol.io/) server that lets a Claude agent **build, deploy, run, and debug real RPA workflows** on [Automat](https://runautomat.com/) — browser/API automations that then run on their own schedule, deterministically, **with zero LLM tokens per run.**
 
-The server is a thin forwarder: each tool calls the studio app's keyless agent API (`/api/agent/*`), which resolves the project from the API key and reuses studio's existing validation, versioning, and execution code.
+> The agent writes the automation *once* (using tokens); the workflow then runs forever on a cron with **no tokens per run**. Token-cheap to create, token-free to operate.
 
-> **Status:** live. All 31 tools forward to the studio API. Connection liveness uses MCP's built-in protocol-level [ping](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/ping), so there is no `ping` tool.
+## The brief
+
+- **Problem.** Back-office/RPA automations take days to build and stay locked inside builder UIs. An AI agent can *do* a task once, but re-doing it every run burns tokens and isn't repeatable or schedulable.
+- **Who it's for.** Anyone with a recurring browser/API task — ops, back-office, founders — and the agents acting on their behalf.
+- **Done looks like.** From a chat/agent: *"build a workflow that does X on a schedule."* The agent authors it through this MCP server, deploys it live, runs it, and returns a recording — and it keeps running on its schedule with no tokens.
+
+## What we built at Build Day
+
+This repo is the **agent-facing layer**: one Vercel Function (`api/mcp.ts`) exposing **32 MCP tools** that forward to Automat studio's project-scoped agent API. Built during the event:
+
+- **Full tool surface** — discover (`get_docs`, `get_workflow_schema`, `list_*`), **build** (`create_workflow`, `edit_workflow` composite-patch model, `read_workflow`), manage (versions, lifecycle, schedules), **run & debug** (`run_workflow`, `get_run` with timeline/io/recording, `cancel_run`), plus secrets, resources, extractors, and HITL.
+- **`get_docs`** — serves the runtime authoring model (code-node globals, `$('NodeName')`, `fetch`, worked examples) so an agent writes working `code` nodes with no source access.
+- **Pass-through auth** — the caller's project key is forwarded per request; **no secrets stored** in this public repo.
+- *(The backend it forwards to — studio's `/api/agent/*` — was built in parallel in our private studio repo.)*
+
+## Demo — "Sauce Demo Shopper"
+
+A Claude agent built this **through the MCP server**: a deterministic Playwright `code` node that logs into saucedemo.com, adds an item, and checks out — **recorded**, ~9s/run, **0 tokens per run**, deployed `active` and schedulable.
+
+- Authored via `create_workflow` + `edit_workflow`, executed via `run_workflow`, recording fetched via `get_run(include:["recording"])`.
+- When the live run hit a native Chrome "breached-password" dialog that swallowed clicks, the agent reproduced it with Chrome DevTools and rewrote the clicks as `page.evaluate(() => el.click())` — **self-corrected**, then re-ran green.
+
+## Try it / verify
+
+Live, and "done" is verifiable by the model with no human in the loop:
+
+- **Responding URL** — `https://workflows.runautomat.com/api/mcp` answers `tools/list` and `tools/call` over Streamable HTTP.
+- **Connect any MCP client** with a project key (see [Connect a client](#connect-a-client)) and run the loop: `get_docs` → `create_workflow` → `run_workflow` → `get_run`.
+- **Acceptance checklist (rubric).** (1) endpoint lists **32 tools**; (2) `create_workflow` + `edit_workflow(patch)` each save a new version; (3) `run_workflow` → `get_run` returns `status:"completed"` with structured `output`; (4) a browser workflow returns a `recordingUrl`.
+
+## How Claude built it (Opus 4.8)
+
+Opus 4.8 drove the whole build: it explored the studio + runtime repos to design the tool schemas, grounded the descriptions in MCP best practices, and **self-verified** — running a full stress test across every tool and real workflow runs *through its own tools*, then fixing a live browser failure with Chrome DevTools. It's repeatable: push to `main` auto-deploys, and `get_docs` + the tool surface let any agent rerun the build loop on a brand-new task.
 
 ## Endpoint
 
@@ -72,7 +104,7 @@ vercel --prod        # deploy (requires vercel login)
 
 # Tools
 
-Live reference for the 31 tools. Each forwards to the studio **agent API** (`STUDIO_API_BASE_URL` + `/api/agent/*`), passing the caller's project-scoped key; the project is resolved from the key. The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
+Live reference for the 32 tools. Each forwards to the studio **agent API** (`STUDIO_API_BASE_URL` + `/api/agent/*`), passing the caller's project-scoped key; the project is resolved from the key. The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
 
 ## Conventions
 
@@ -85,6 +117,11 @@ Live reference for the 31 tools. Each forwards to the studio **agent API** (`STU
 Each tool lists its **input**, **output**, and the backing `/api/agent` call.
 
 ## Context & schema
+
+### `get_docs`
+Authoring guide — **call first**. How to write `code`/`decision` nodes: globals (`$('NodeName')`, `fetch`, `secrets`, `page`/`context`, `logger`), async/`return` semantics, node types, browser/recording, schedules, and worked examples.
+- Input: `{ topic?: 'overview'|'codeNodes'|'nodeTypes'|'browser'|'secrets'|'schedules'|'examples' }`
+- Output: the docs (all sections, or one `topic`)
 
 ### `list_runtime_versions`
 - Input: none
