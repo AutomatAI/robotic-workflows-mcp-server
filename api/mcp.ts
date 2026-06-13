@@ -253,41 +253,48 @@ const CODE_MODEL =
 const CODE_EXAMPLE =
   "Example block — {type:'block',name:'Fetch',mode:'code',position:{x:160,y:0},code:\"await page.goto('https://example.com'); return { title: await page.title() };\"}";
 
-// Full authoring guide returned by get_workflow_schema (on-demand, so it can be
-// detailed). This is where an agent learns HOW to write a code/decision node —
-// the JSON Schema only describes structure.
-const AUTHORING_GUIDE = {
-  nodeTypes: "start, end, block, decision, document, hitl. Compose with edges (start → … → end).",
-  codeBlocks:
-    "A block with mode:'code' is deterministic (no LLM tokens). Its `code` runs as the body of an async function — use `await`, TypeScript is supported — and must `return` a value, which becomes the node's output. The run's final result is the last node's return value.",
-  globals: {
-    "$('NodeName')":
-      "The ONLY way to read another node's output: returns that node's return value. There are no per-node global variables — check the node's input.availableNodeNames for valid names.",
-    fetch: "Standard fetch() is available for HTTP/API calls.",
-    "page, context": "Playwright Page and BrowserContext (present when the workflow uses a browser).",
-    secrets: "Project secrets by name, e.g. secrets.MY_KEY (native vault + Doppler; native wins).",
-    "helpers, projectResources": "Workflow helper functions and named project resources.",
-    logger: "logger.info(msg) / logger.error(msg).",
-    "emit, state": "Event emit() and cross-run state (state.sessions.previous, state.artifacts).",
+// Canonical authoring docs, served on demand by the get_docs tool (so they can be
+// detailed without always-on context cost). This is where an agent learns HOW to
+// write a code/decision node — the JSON Schema only describes structure.
+const DOCS = {
+  overview:
+    "Automat workflows let an agent build, deploy, and schedule deterministic RPA that runs on its own with no LLM tokens. A workflow is a graph: exactly one `start`, one+ `end`, and `block`/`decision`/`document`/`hitl` nodes between, joined by edges. Build loop: get_docs (this) → get_workflow_schema (exact JSON shape) → create_workflow OR read_workflow(view:'graph') then edit_workflow(patch) → run_workflow → get_run.",
+  codeNodes: {
+    summary:
+      "block mode:'code' is deterministic (no tokens). The `code` runs as the body of an async function — use await, TypeScript supported — and must `return` a value (becomes the node's output; the run's final output is the last node's return, surfaced under output.output).",
+    globals: {
+      "$('NodeName')":
+        "Read another node's return value, e.g. $('Fetch').items. The only way to access prior output; check the node's input.availableNodeNames for valid names.",
+      fetch: "Standard fetch() for HTTP/API calls.",
+      "page, context": "Playwright Page/BrowserContext — present only when settings.browser is set.",
+      secrets: "Project secrets by name: secrets.MY_KEY (set via set_secrets; injected at runtime).",
+      "helpers, projectResources": "Workflow helper functions and named project resources.",
+      logger: "logger.info(msg) / logger.error(msg).",
+      "emit, state": "emit(title,event,data) for events; state.sessions.previous / state.artifacts for cross-run state.",
+    },
   },
-  decision: "A decision node has a boolean `expression` (same scope as code). Route the two outgoing edges with handle 'true' / 'false'.",
+  nodeTypes: {
+    start: "Entry point (exactly one).",
+    end: "Exit point; passes through the previous node's output.",
+    block: "Runs code (mode:'code') or an AI agent (mode:'execute' — costs tokens; prefer code). Fields: name, position, mode, code | (instructions + execute).",
+    decision: "Boolean `expression` (same scope as code). Route the two outgoing edges with handle 'true' / 'false'.",
+    document: "Extract data from files via an extractor (extractorId + fileInputs). Find ids with list_extractors.",
+    hitl: "Pause for a human: prompt + actions:[{id,label}]. Outgoing edges route by action id or 'timeout'.",
+  },
   browser:
-    "To record, set settings.browser = { headless:false, recording:true }. `page` is Playwright. Tip: a native dialog (e.g. a 'breached password' bubble after login) can swallow real input clicks and stall navigation — if so, click buttons in-page: await page.evaluate(() => document.querySelector(sel).click()).",
+    "Set settings.browser = { headless:false, recording:true } to capture a recording (get_run include:['recording']). `page` is Playwright. Tip: a native post-login dialog (e.g. a 'breached password' bubble) can swallow real input clicks and stall navigation — if so, click in-page: await page.evaluate(() => document.querySelector(sel).click()).",
+  secrets:
+    "Store with set_secrets({secrets:[{key,value}]}); read at runtime as secrets.KEY inside a code block. list_secrets never returns values.",
+  schedules:
+    "create_schedule with an RFC 5545 recurrenceRule (e.g. 'FREQ=DAILY;BYHOUR=9'), evaluated in UTC. Run input comes from a linked project resource (inputResourceName).",
   examples: [
-    {
-      title: "HTTP fetch → return",
-      code: "const r = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');\nconst ids = await r.json();\nreturn { topIds: ids.slice(0, 5) };",
-    },
-    {
-      title: "Read a previous node's output with $()",
-      code: "const prev = $('Fetch');\nreturn { count: (prev.topIds || []).length };",
-    },
-    {
-      title: "Browser code block",
-      code: "await page.goto('https://example.com');\nreturn { title: await page.title() };",
-    },
+    { title: "HTTP fetch → return", code: "const r = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');\nreturn { topIds: (await r.json()).slice(0, 5) };" },
+    { title: "Chain nodes with $()", code: "const ids = $('Fetch').topIds;\nreturn { count: ids.length };" },
+    { title: "Browser code block", code: "await page.goto('https://example.com');\nreturn { title: await page.title() };" },
+    { title: "Use a secret", code: "const res = await fetch('https://api.example.com', { headers: { Authorization: 'Bearer ' + secrets.API_TOKEN } });\nreturn await res.json();" },
   ],
 };
+const DOCS_TOPICS = ["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "examples"] as const;
 
 const DefinitionInput = z
   .record(z.string(), z.unknown())
@@ -378,18 +385,35 @@ const baseHandler = createMcpHandler(
     );
 
     server.registerTool(
+      "get_docs",
+      {
+        title: "Get authoring docs",
+        description:
+          "How to author Automat workflows: code-node globals ($('NodeName'), fetch, secrets), async/return semantics, node types, browser/recording, schedules, and worked examples. CALL THIS FIRST when building or editing a workflow. Pass `topic` to return just one section.",
+        inputSchema: {
+          topic: z
+            .enum(["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "examples"])
+            .describe("Optional: return only this section.")
+            .optional(),
+        },
+        annotations: RO,
+      },
+      async ({ topic }) => result(topic ? { [topic]: (DOCS as Record<string, unknown>)[topic] } : { topics: DOCS_TOPICS, ...DOCS }),
+    );
+
+    server.registerTool(
       "get_workflow_schema",
       {
         title: "Get workflow schema",
         description:
-          "Returns the workflow JSON Schema PLUS an authoringGuide (how to write code/decision nodes: globals like $('NodeName') and fetch, async/return semantics, examples). Call before creating or editing a workflow. Returns: { runtimeVersion, jsonSchema, authoringGuide }.",
+          "Returns the workflow definition JSON Schema (exact field shapes). Call get_docs for HOW to write node code (globals, $(), examples). Returns: { runtimeVersion, jsonSchema }.",
         inputSchema: { runtimeVersion: z.string().describe("Defaults to 'latest'.").optional() },
         annotations: RO,
       },
       async ({ runtimeVersion }) => {
         try {
           const r = await api("GET", "/api/agent/schema");
-          return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema, authoringGuide: AUTHORING_GUIDE });
+          return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema, seeAlso: "Call get_docs for code-node authoring (globals, $(), examples)." });
         } catch (e) {
           return fail(e);
         }
@@ -1153,7 +1177,7 @@ const baseHandler = createMcpHandler(
     serverInfo: { name: "automat-robotic-workflows", version: "0.4.0" },
     instructions:
       "Build, run, and manage Automat RPA workflows in one project (the API key resolves the project; no project id is needed).\n\n" +
-      "Build loop: get_workflow_schema for the node/edge shape, read_workflow(view:'graph') to see the current graph, then edit_workflow with a small patch (validates and saves a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
+      "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit_workflow with a small patch (validates and saves a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
       "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",
   },
   { basePath: "/api", maxDuration: 60, verboseLogs: true },
