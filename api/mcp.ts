@@ -6,7 +6,7 @@ import { z } from "zod";
  * Automat Robotic Workflows MCP Server.
  *
  * Stateless Streamable-HTTP endpoint (plain Vercel Function). Each tool forwards
- * to the studio "thin client" — the project-scoped v1 API under /api/v1/... —
+ * to the studio "thin client" — the project-scoped v1 API under /api/agent/... —
  * authenticating with a project-scoped key (ak_...). The project is resolved
  * from that key server-side, so no projectId is sent.
  *
@@ -21,7 +21,7 @@ import { z } from "zod";
 // VERCEL_AUTOMATION_BYPASS_SECRET (this preview is public, so it's optional).
 const STUDIO_API_BASE_URL = (
   process.env.STUDIO_API_BASE_URL ??
-  "https://studio-phfamfo8s-automat-4a06a9d7.vercel.app"
+  "https://studio-5a08h7206-automat-4a06a9d7.vercel.app"
 ).replace(/\/$/, "");
 const VERCEL_BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 
@@ -52,7 +52,7 @@ function extractKey(req: Request): string | null {
 // Studio API client
 // ---------------------------------------------------------------------------
 class ApiError extends Error {
-  constructor(public status: number, public apiCode: string, message: string) {
+  constructor(public status: number, public apiCode: string, message: string, public issues?: unknown) {
     super(message);
   }
 }
@@ -102,7 +102,7 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
   if (!res.ok) {
     const apiCode = (data && data.error) || `http_${res.status}`;
     const message = (data && (data.message || data.error)) || text || res.statusText;
-    throw new ApiError(res.status, String(apiCode), String(message));
+    throw new ApiError(res.status, String(apiCode), String(message), data && data.issues);
   }
   return data;
 }
@@ -129,13 +129,17 @@ function ourCode(status: number): string {
 
 function fail(e: unknown) {
   if (e instanceof ApiError) {
-    return result({ error: { code: ourCode(e.status), status: e.status, message: e.message } });
+    return result({
+      error: {
+        code: ourCode(e.status),
+        status: e.status,
+        message: e.message,
+        ...(e.issues ? { issues: e.issues } : {}),
+      },
+    });
   }
   return result({ error: { code: "internal_error", message: e instanceof Error ? e.message : String(e) } });
 }
-
-const comingSoon = (message: string) =>
-  result({ coming_soon: true, message: `Coming soon: ${message}` });
 
 // Pagination: our tools speak {limit, cursor}/{items, nextCursor}; the API speaks
 // {page, pageSize}/{..., totalPages, currentPage}. Translate the cursor as a page number.
@@ -278,16 +282,18 @@ const mapWorkflow = (w: any) => ({
   activeVersionId: w.activeVersionId ?? null,
   apiEnabled: w.apiEnabled,
   apiUrlSlug: w.apiUrlSlug ?? null,
+  sessionCount: w.sessionCount ?? null,
+  lastRunAt: w.lastRunAt ?? null,
   updatedAt: w.updatedAt,
 });
 
 // Resolve a secret/resource id by name (the v1 API addresses these by id).
 async function findSecretId(name: string): Promise<string | null> {
-  const r = await api("GET", "/api/v1/secrets", { query: { name, pageSize: 1 } });
+  const r = await api("GET", "/api/agent/secrets", { query: { name, pageSize: 1 } });
   return r.secrets?.[0]?.id ?? null;
 }
 async function findResource(name: string, lifecycle?: string): Promise<any | null> {
-  const r = await api("GET", "/api/v1/resources", { query: { name, lifecycle, pageSize: 1 } });
+  const r = await api("GET", "/api/agent/resources", { query: { name, lifecycle, pageSize: 1 } });
   return r.resources?.[0] ?? null;
 }
 
@@ -333,7 +339,7 @@ const baseHandler = createMcpHandler(
       },
       async ({ runtimeVersion }) => {
         try {
-          const r = await api("GET", "/api/v1/schema");
+          const r = await api("GET", "/api/agent/schema");
           return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema });
         } catch (e) {
           return fail(e);
@@ -354,7 +360,7 @@ const baseHandler = createMcpHandler(
       async ({ status, search, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", "/api/v1/workflows", { query: { page, pageSize: lim ?? 25 } });
+          const r = await api("GET", "/api/agent/workflows", { query: { page, pageSize: lim ?? 25 } });
           let items = (r.workflows ?? []).map(mapWorkflow);
           if (status) items = items.filter((w: any) => w.status === status);
           if (search) {
@@ -385,7 +391,7 @@ const baseHandler = createMcpHandler(
       async ({ name, definition }) => {
         try {
           const def = definition ?? MIN_DEFINITION(name);
-          const r = await api("POST", "/api/v1/workflows", { body: { definition: def, name } });
+          const r = await api("POST", "/api/agent/workflows", { body: { definition: def, name } });
           return result({
             workflowId: r.workflow?.id,
             versionId: r.version?.id,
@@ -409,12 +415,12 @@ const baseHandler = createMcpHandler(
       },
       async ({ workflowId, name }) => {
         try {
-          const src = await api("GET", `/api/v1/workflows/${workflowId}`);
+          const src = await api("GET", `/api/agent/workflows/${workflowId}`);
           const def = src.workflow?.activeVersion?.definition;
           if (!def) return result({ error: { code: "not_found", message: "Source workflow has no active version to copy." } });
           const newName = name ?? `Copy of ${src.workflow?.name ?? "workflow"}`;
           const created = { ...def, name: newName };
-          const r = await api("POST", "/api/v1/workflows", { body: { definition: created, name: newName } });
+          const r = await api("POST", "/api/agent/workflows", { body: { definition: created, name: newName } });
           return result({ workflowId: r.workflow?.id, name: r.workflow?.name ?? newName });
         } catch (e) {
           return fail(e);
@@ -437,7 +443,7 @@ const baseHandler = createMcpHandler(
       },
       async ({ workflowId, view, nodeName }) => {
         try {
-          const r = await api("GET", `/api/v1/workflows/${workflowId}`);
+          const r = await api("GET", `/api/agent/workflows/${workflowId}`);
           const w = r.workflow;
           if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
           const def = w.activeVersion?.definition ?? null;
@@ -481,7 +487,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Update workflow settings",
         description:
-          "Updates lifecycle status and API-trigger config. status: preview | active | disabled (activating needs a published version). NOTE: name/description editing and status='development' are not yet supported by the API. Returns the updated { workflowId, name, status, apiEnabled, apiUrlSlug }.",
+          "Updates a workflow's name, description, lifecycle status, and API-trigger config — not its graph (use edit_workflow). status: development | preview | active | disabled (activating needs a published version; disabling auto-pauses schedules). Returns the updated workflow.",
         inputSchema: {
           workflowId: z.string(),
           name: z.string().optional(),
@@ -493,14 +499,16 @@ const baseHandler = createMcpHandler(
         annotations: UPSERT,
       },
       async ({ workflowId, name, description, status, apiEnabled, apiUrlSlug }) => {
-        if (name !== undefined || description !== undefined)
-          return comingSoon("editing a workflow's name/description via update_workflow — the v1 API PATCH only accepts status/apiEnabled/apiUrlSlug.");
-        if (status === "development")
-          return comingSoon("setting status back to 'development' — the v1 API PATCH only allows preview/active/disabled.");
-        if (status === undefined && apiEnabled === undefined && apiUrlSlug === undefined)
-          return result({ error: { code: "bad_request", message: "Provide at least one of status, apiEnabled, apiUrlSlug." } });
+        const body: Record<string, unknown> = {};
+        if (name !== undefined) body.name = name;
+        if (description !== undefined) body.description = description;
+        if (status !== undefined) body.status = status;
+        if (apiEnabled !== undefined) body.apiEnabled = apiEnabled;
+        if (apiUrlSlug !== undefined) body.apiUrlSlug = apiUrlSlug;
+        if (Object.keys(body).length === 0)
+          return result({ error: { code: "bad_request", message: "Provide at least one field to update." } });
         try {
-          const r = await api("PATCH", `/api/v1/workflows/${workflowId}`, { body: { status, apiEnabled, apiUrlSlug } });
+          const r = await api("PATCH", `/api/agent/workflows/${workflowId}`, { body });
           return result(mapWorkflow(r.workflow));
         } catch (e) {
           return fail(e);
@@ -518,7 +526,7 @@ const baseHandler = createMcpHandler(
       },
       async ({ workflowId }) => {
         try {
-          const r = await api("DELETE", `/api/v1/workflows/${workflowId}`);
+          const r = await api("DELETE", `/api/agent/workflows/${workflowId}`);
           return result({ success: r.deleted === true, workflowId });
         } catch (e) {
           return fail(e);
@@ -542,7 +550,7 @@ const baseHandler = createMcpHandler(
       },
       async ({ workflowId, patch, expectedActiveVersionId }) => {
         try {
-          const cur = await api("GET", `/api/v1/workflows/${workflowId}`);
+          const cur = await api("GET", `/api/agent/workflows/${workflowId}`);
           const w = cur.workflow;
           if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
           const current = w.activeVersion?.definition;
@@ -553,7 +561,7 @@ const baseHandler = createMcpHandler(
           } catch (patchErr) {
             return result({ error: { code: "validation_failed", message: patchErr instanceof Error ? patchErr.message : String(patchErr) } });
           }
-          const r = await api("PUT", `/api/v1/workflows/${workflowId}`, {
+          const r = await api("PUT", `/api/agent/workflows/${workflowId}`, {
             body: { definition: next, name: next.name, expectedActiveVersionId: expectedActiveVersionId ?? w.activeVersionId },
           });
           return result({ ok: true, versionId: r.version?.id, versionNumber: r.version?.versionNumber, deduped: r.version?.deduped ?? false });
@@ -575,7 +583,7 @@ const baseHandler = createMcpHandler(
       async ({ workflowId, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", `/api/v1/workflows/${workflowId}/versions`, { query: { page, pageSize: lim ?? 25 } });
+          const r = await api("GET", `/api/agent/workflows/${workflowId}/versions`, { query: { page, pageSize: lim ?? 25 } });
           const items = (r.versions ?? []).map((v: any) => ({
             versionId: v.id, versionNumber: v.versionNumber, name: v.name ?? null, source: v.source ?? null, createdAt: v.createdAt,
           }));
@@ -594,7 +602,16 @@ const baseHandler = createMcpHandler(
         inputSchema: { workflowId: z.string(), versionId: z.string() },
         annotations: RO,
       },
-      async () => comingSoon("single-version retrieval — the v1 API has no GET /workflows/{id}/versions/{versionId} (the version list omits definitions)."),
+      async ({ workflowId, versionId }) => {
+        try {
+          const r = await api("GET", `/api/agent/workflows/${workflowId}/versions/${versionId}`);
+          const v = r.version;
+          if (!v) return result({ error: { code: "not_found", message: "Version not found." } });
+          return result({ versionId: v.id, versionNumber: v.versionNumber, name: v.name ?? null, source: v.source ?? null, createdAt: v.createdAt, definition: v.definition });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -605,7 +622,16 @@ const baseHandler = createMcpHandler(
         inputSchema: { workflowId: z.string(), versionId: z.string(), expectedActiveVersionId: z.string().optional() },
         annotations: CREATE,
       },
-      async () => comingSoon("version revert — depends on single-version retrieval (get_version), which the v1 API does not expose yet."),
+      async ({ workflowId, versionId, expectedActiveVersionId }) => {
+        try {
+          const r = await api("POST", `/api/agent/workflows/${workflowId}/versions/${versionId}/revert`, {
+            body: { expectedActiveVersionId },
+          });
+          return result({ versionId: r.version?.id, versionNumber: r.version?.versionNumber, revertedFromVersionNumber: r.revertedFromVersionNumber });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     // ---- Schedules ----
@@ -619,7 +645,7 @@ const baseHandler = createMcpHandler(
       },
       async ({ workflowId }) => {
         try {
-          const r = await api("GET", `/api/v1/workflows/${workflowId}/schedules`);
+          const r = await api("GET", `/api/agent/workflows/${workflowId}/schedules`);
           const items = (r.schedules ?? []).map((s: any) => ({
             scheduleId: s.id, name: s.name ?? null, recurrenceRule: s.recurrenceRule, startAt: s.startAt ?? null,
             status: s.status, nextFireAt: s.nextFireAt ?? null, inputResourceName: s.inputResourceName ?? null,
@@ -636,23 +662,29 @@ const baseHandler = createMcpHandler(
       {
         title: "Create schedule",
         description:
-          "Creates a recurring schedule using an RFC 5545 recurrence rule (e.g. 'FREQ=DAILY;BYHOUR=9'). Run input comes from a linked project resource (inputResourceName). Returns: { scheduleId }. (timezone/enabled on create are not supported by the API yet.)",
+          "Creates a recurring schedule using an RFC 5545 recurrence rule (e.g. 'FREQ=DAILY;BYHOUR=9'). Run input comes from a linked project resource (inputResourceName). Set enabled:false to create it paused. Returns: { scheduleId }. (Note: the platform is UTC-only; timezone is accepted but not yet honored.)",
         inputSchema: {
           workflowId: z.string(),
           recurrenceRule: z.string().describe("RFC 5545 RRULE."),
           name: z.string().optional(),
           startAt: z.string().describe("ISO 8601 datetime.").optional(),
-          timezone: z.string().optional(),
+          timezone: z.string().describe("Accepted but not yet honored (platform is UTC-only).").optional(),
           enabled: z.boolean().optional(),
           inputResourceName: z.string().optional(),
         },
         annotations: CREATE,
       },
-      async ({ workflowId, recurrenceRule, name, startAt, inputResourceName }) => {
+      async ({ workflowId, recurrenceRule, name, startAt, timezone, enabled, inputResourceName }) => {
         try {
-          const r = await api("POST", `/api/v1/workflows/${workflowId}/schedules`, {
-            body: { name: name ?? null, recurrence_rule: recurrenceRule, start_at: startAt, input_resource_name: inputResourceName ?? null },
-          });
+          const body: Record<string, unknown> = {
+            name: name ?? null,
+            recurrence_rule: recurrenceRule,
+            start_at: startAt,
+            input_resource_name: inputResourceName ?? null,
+          };
+          if (timezone !== undefined) body.timezone = timezone;
+          if (enabled !== undefined) body.status = enabled ? "active" : "paused";
+          const r = await api("POST", `/api/agent/workflows/${workflowId}/schedules`, { body });
           return result({ scheduleId: r.schedule?.id });
         } catch (e) {
           return fail(e);
@@ -685,7 +717,7 @@ const baseHandler = createMcpHandler(
           if (startAt !== undefined) body.start_at = startAt;
           if (inputResourceName !== undefined) body.input_resource_name = inputResourceName;
           if (enabled !== undefined) body.status = enabled ? "active" : "paused";
-          const r = await api("PATCH", `/api/v1/workflows/${workflowId}/schedules/${scheduleId}`, { body });
+          const r = await api("PATCH", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`, { body });
           return result({ scheduleId: r.schedule?.id ?? scheduleId });
         } catch (e) {
           return fail(e);
@@ -703,7 +735,7 @@ const baseHandler = createMcpHandler(
       },
       async ({ workflowId, scheduleId }) => {
         try {
-          const r = await api("DELETE", `/api/v1/workflows/${workflowId}/schedules/${scheduleId}`);
+          const r = await api("DELETE", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`);
           return result({ success: r.success === true, scheduleId });
         } catch (e) {
           return fail(e);
@@ -717,17 +749,17 @@ const baseHandler = createMcpHandler(
       {
         title: "Run workflow",
         description:
-          "Triggers a run of the workflow's active version. `input` is validated against the workflow's input schema. (The environment is chosen server-side.) Returns: { sessionId, status: 'queued' } — poll get_run.",
+          "Triggers a run of the workflow's active version. `input` is validated against the workflow's input schema. `environment` selects the run environment (default production). Returns: { sessionId, status: 'queued' } — poll get_run.",
         inputSchema: {
           workflowId: z.string(),
           input: z.record(z.string(), z.unknown()).optional(),
-          environment: Environment.optional(),
+          environment: Environment.describe("Run environment; defaults to production.").optional(),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ workflowId, input }) => {
+      async ({ workflowId, input, environment }) => {
         try {
-          const r = await api("POST", `/api/v1/workflows/${workflowId}/run`, { body: input ?? {} });
+          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { query: { environment }, body: input ?? {} });
           return result({ sessionId: r.sessionId, status: r.status ?? "queued" });
         } catch (e) {
           return fail(e);
@@ -746,7 +778,7 @@ const baseHandler = createMcpHandler(
       async ({ workflowId, status, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", "/api/v1/sessions", { query: { workflowId, page, pageSize: lim ?? 25 } });
+          const r = await api("GET", "/api/agent/sessions", { query: { workflowId, page, pageSize: lim ?? 25 } });
           let items = (r.sessions ?? []).map((s: any) => ({
             sessionId: s.id, workflowId: s.workflowId, status: s.status, source: s.source ?? null,
             startedAt: s.startedAt ?? null, endedAt: s.endedAt ?? null,
@@ -765,7 +797,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Get run",
         description:
-          "Returns a run's status and result; add `include` for deeper data. include: 'timeline' (per-node status+timing), 'io' (per-node input/output). NOTE: 'logs' and 'recording' are not yet exposed by the API.",
+          "Returns a run's status and result; add `include` for deeper data. include: 'timeline' (per-node status+timing), 'io' (per-node input/output), 'logs' (paginated; reconstructed from node timing), 'recording' (browser video URL when available). Omit include for a lightweight summary.",
         inputSchema: {
           sessionId: z.string(),
           include: z.array(z.enum(["timeline", "io", "logs", "recording"])).optional(),
@@ -773,10 +805,10 @@ const baseHandler = createMcpHandler(
         },
         annotations: RO,
       },
-      async ({ sessionId, include }) => {
+      async ({ sessionId, include, logsCursor }) => {
         try {
           const inc = new Set(include ?? []);
-          const r = await api("GET", `/api/v1/sessions/${sessionId}`);
+          const r = await api("GET", `/api/agent/sessions/${sessionId}`);
           const s = r.session;
           if (!s) return result({ error: { code: "not_found", message: "Run not found." } });
           const out: Record<string, unknown> = {
@@ -786,15 +818,18 @@ const baseHandler = createMcpHandler(
             durationMs: s.durationSeconds != null ? Math.round(s.durationSeconds * 1000) : null,
           };
           if (inc.has("timeline") || inc.has("io")) {
-            const n = await api("GET", `/api/v1/sessions/${sessionId}/nodes`);
+            const n = await api("GET", `/api/agent/sessions/${sessionId}/nodes`);
             const nodes = n.nodes ?? [];
             if (inc.has("timeline"))
               out.timeline = nodes.map((nd: any) => ({ name: nd.name, type: nd.type, status: nd.status, startedAt: nd.startedAt, endedAt: nd.endedAt, durationMs: durMs(nd.startedAt, nd.endedAt) }));
             if (inc.has("io"))
               out.nodeIO = nodes.map((nd: any) => ({ name: nd.name, input: nd.inputData ?? null, output: nd.outputData ?? null }));
           }
-          if (inc.has("logs") || inc.has("recording"))
-            out.note = "Coming soon: logs and recording are not yet exposed by the API.";
+          if (inc.has("recording")) out.recordingUrl = s.recordingUrl ?? null;
+          if (inc.has("logs")) {
+            const lg = await api("GET", `/api/agent/sessions/${sessionId}/logs`, { query: { cursor: logsCursor } });
+            out.logs = { entries: lg.logs ?? [], nextCursor: lg.nextCursor ?? null };
+          }
           return result(out);
         } catch (e) {
           return fail(e);
@@ -812,7 +847,7 @@ const baseHandler = createMcpHandler(
       },
       async ({ sessionId }) => {
         try {
-          const r = await api("POST", `/api/v1/sessions/${sessionId}/stop`);
+          const r = await api("POST", `/api/agent/sessions/${sessionId}/stop`);
           return result({ success: true, status: r.status ?? "canceled", sessionId });
         } catch (e) {
           return fail(e);
@@ -829,7 +864,20 @@ const baseHandler = createMcpHandler(
         inputSchema: { sessionId: z.string().optional(), status: z.enum(["pending", "completed", "expired"]).optional(), limit, cursor },
         annotations: RO,
       },
-      async () => comingSoon("HITL task listing — the v1 API does not expose /hitl yet (only the internal /api/projects surface)."),
+      async ({ sessionId, status, limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", "/api/agent/hitl/tasks", { query: { sessionId, status, page, pageSize: lim ?? 25 } });
+          const items = (r.tasks ?? []).map((t: any) => ({
+            taskId: t.id, sessionId: t.sessionId, workflowId: t.workflowId, nodeName: t.nodeName,
+            prompt: t.prompt, actions: t.actions, isApproval: t.isApproval, fields: t.fields,
+            status: t.status, createdAt: t.createdAt, expiresAt: t.expiresAt,
+          }));
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -840,7 +888,14 @@ const baseHandler = createMcpHandler(
         inputSchema: { taskId: z.string(), action: z.string(), fields: z.record(z.string(), z.unknown()).optional() },
         annotations: CREATE,
       },
-      async () => comingSoon("HITL task completion — the v1 API does not expose /hitl yet (only the internal /api/projects surface)."),
+      async ({ taskId, action, fields }) => {
+        try {
+          const r = await api("POST", `/api/agent/hitl/tasks/${taskId}/complete`, { body: { action, fields } });
+          return result({ success: r.success ?? true });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     // ---- Secrets ----
@@ -855,7 +910,7 @@ const baseHandler = createMcpHandler(
       async ({ lifecycle, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", "/api/v1/secrets", { query: { lifecycle, page, pageSize: lim ?? 25 } });
+          const r = await api("GET", "/api/agent/secrets", { query: { lifecycle, page, pageSize: lim ?? 25 } });
           const items = (r.secrets ?? []).map((s: any) => ({ key: s.name, last4: s.last4 ?? null, lifecycle: s.lifecycle ?? null, updatedAt: s.updatedAt }));
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
@@ -879,8 +934,8 @@ const baseHandler = createMcpHandler(
           const updated: string[] = [];
           for (const s of secrets) {
             const id = await findSecretId(s.key);
-            if (id) await api("PUT", `/api/v1/secrets/${id}`, { body: { value: s.value, lifecycle: s.lifecycle } });
-            else await api("POST", "/api/v1/secrets", { body: { name: s.key, value: s.value, lifecycle: s.lifecycle } });
+            if (id) await api("PUT", `/api/agent/secrets/${id}`, { body: { value: s.value, lifecycle: s.lifecycle } });
+            else await api("POST", "/api/agent/secrets", { body: { name: s.key, value: s.value, lifecycle: s.lifecycle } });
             updated.push(s.key);
           }
           return result({ updated });
@@ -902,7 +957,7 @@ const baseHandler = createMcpHandler(
         try {
           const id = await findSecretId(key);
           if (!id) return result({ error: { code: "not_found", message: `No secret named "${key}".` } });
-          await api("DELETE", `/api/v1/secrets/${id}`);
+          await api("DELETE", `/api/agent/secrets/${id}`);
           return result({ success: true, key });
         } catch (e) {
           return fail(e);
@@ -922,7 +977,7 @@ const baseHandler = createMcpHandler(
       async ({ lifecycle, search, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", "/api/v1/resources", { query: { lifecycle, name: search, page, pageSize: lim ?? 25 } });
+          const r = await api("GET", "/api/agent/resources", { query: { lifecycle, name: search, page, pageSize: lim ?? 25 } });
           const items = (r.resources ?? []).map((x: any) => ({ name: x.name, kind: "data", description: x.description ?? null, lifecycle: x.lifecycle ?? null, updatedAt: x.updatedAt }));
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
@@ -961,8 +1016,8 @@ const baseHandler = createMcpHandler(
       async ({ name, value, description, lifecycle }) => {
         try {
           const existing = await findResource(name, lifecycle);
-          if (existing) await api("PUT", `/api/v1/resources/${existing.id}`, { body: { value, description } });
-          else await api("POST", "/api/v1/resources", { body: { name, value, description, lifecycle } });
+          if (existing) await api("PUT", `/api/agent/resources/${existing.id}`, { body: { value, description } });
+          else await api("POST", "/api/agent/resources", { body: { name, value, description, lifecycle } });
           return result({ name });
         } catch (e) {
           return fail(e);
@@ -982,7 +1037,7 @@ const baseHandler = createMcpHandler(
         try {
           const x = await findResource(name, lifecycle);
           if (!x) return result({ error: { code: "not_found", message: `No resource named "${name}".` } });
-          await api("DELETE", `/api/v1/resources/${x.id}`);
+          await api("DELETE", `/api/agent/resources/${x.id}`);
           return result({ success: true, name });
         } catch (e) {
           return fail(e);
@@ -999,7 +1054,18 @@ const baseHandler = createMcpHandler(
         inputSchema: { search: z.string().optional(), limit, cursor },
         annotations: RO,
       },
-      async () => comingSoon("extractor listing — the v1 API does not expose /extractors yet (only the internal /api/projects surface)."),
+      async ({ search, limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", "/api/agent/extractors", { query: { search, page, pageSize: lim ?? 25 } });
+          const items = (r.extractors ?? []).map((x: any) => ({
+            extractorId: x.id, name: x.name, activeVersionId: x.activeVersionId ?? null, description: x.description ?? null,
+          }));
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
 
     server.registerTool(
@@ -1010,7 +1076,14 @@ const baseHandler = createMcpHandler(
         inputSchema: { extractorId: z.string(), view: z.enum(["summary", "full"]).optional() },
         annotations: RO,
       },
-      async () => comingSoon("extractor retrieval — the v1 API does not expose /extractors yet (only the internal /api/projects surface)."),
+      async ({ extractorId, view }) => {
+        try {
+          const r = await api("GET", `/api/agent/extractors/${extractorId}`, { query: { view } });
+          return result({ extractor: r.extractor ?? r });
+        } catch (e) {
+          return fail(e);
+        }
+      },
     );
   },
   {
@@ -1018,8 +1091,7 @@ const baseHandler = createMcpHandler(
     instructions:
       "Build, run, and manage Automat RPA workflows in one project (the API key resolves the project; no project id is needed).\n\n" +
       "Build loop: get_workflow_schema for the node/edge shape, read_workflow(view:'graph') to see the current graph, then edit_workflow with a small patch (validates and saves a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
-      "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules and a linked project resource for input. Secrets are write-only.\n\n" +
-      "Some tools return { coming_soon: true } until the backend exposes them (get_version, revert_to_version, HITL, extractors, and get_run logs/recording).",
+      "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",
   },
   { basePath: "/api", maxDuration: 60, verboseLogs: true },
 );
