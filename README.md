@@ -48,13 +48,13 @@ Streamable HTTP, stateless. The Vercel default URL (`https://robotic-workflows-m
 
 ## Authentication
 
-**Pass-through.** The caller supplies a project-scoped studio key (`ak_…`); the server forwards it to the studio API per request. No keys are stored or committed. The key is read three ways (checked in order):
+**Pass-through.** The caller supplies a Studio **personal access token** (`pat_…`, minted in Studio → Settings → Personal access tokens); the server forwards it as a Bearer to the studio public v1 API per request. No tokens are stored or committed. The token is read three ways (checked in order):
 
 | Source | Use |
 | --- | --- |
-| `?api_key=ak_…` query param | Claude web/desktop connector (its UI has no header field) |
-| `x-api-key: ak_…` header | generic clients |
-| `Authorization: Bearer ak_…` header | Claude Code CLI |
+| `?api_key=pat_…` query param | Claude web/desktop connector (its UI has no header field) |
+| `x-api-key: pat_…` header | generic clients |
+| `Authorization: Bearer pat_…` header | Claude Code CLI |
 
 ## Configuration (Vercel env)
 
@@ -65,26 +65,26 @@ Streamable HTTP, stateless. The Vercel default URL (`https://robotic-workflows-m
 
 ## Connect a client
 
-Replace `ak_…` with your project-scoped studio key.
+Replace `pat_…` with your personal access token. A PAT spans every project you can access, so the target project is **connection-scoped**: add `&project_id=<uuid>` to the URL (or send an `x-project-id` header / set `STUDIO_DEFAULT_PROJECT_ID` on the server). Secrets tools additionally need the Doppler identifiers (`dopplerProject`/`dopplerConfig` tool inputs, or `STUDIO_DOPPLER_PROJECT`/`STUDIO_DOPPLER_CONFIG`).
 
 **Claude web / desktop** — Settings → Connectors → Add custom connector → URL:
 
 ```
-https://workflows.runautomat.com/api/mcp?api_key=ak_…
+https://workflows.runautomat.com/api/mcp?api_key=pat_…&project_id=<uuid>
 ```
 
 **Claude Code**
 
 ```bash
 claude mcp add --transport http automat \
-  "https://workflows.runautomat.com/api/mcp?api_key=ak_…"
+  "https://workflows.runautomat.com/api/mcp?api_key=pat_…&project_id=<uuid>"
 ```
 
 **MCP Inspector**
 
 ```bash
 npx @modelcontextprotocol/inspector
-# Streamable HTTP → https://workflows.runautomat.com/api/mcp?api_key=ak_…
+# Streamable HTTP → https://workflows.runautomat.com/api/mcp?api_key=pat_…&project_id=<uuid>
 ```
 
 ## Development
@@ -104,7 +104,7 @@ vercel --prod        # deploy (requires vercel login)
 
 # Tools
 
-Live reference for the 32 tools. Each forwards to the studio **agent API** (`STUDIO_API_BASE_URL` + `/api/agent/*`), passing the caller's project-scoped key; the project is resolved from the key. The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
+Live reference for the 32 tools. Each forwards to the studio **public v1 API** (`STUDIO_API_BASE_URL` + `/api/v1/projects/{projectId}/*`), passing the caller's PAT; the project comes from the connection (`project_id`). The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
 
 ## Conventions
 
@@ -114,7 +114,7 @@ Live reference for the 32 tools. Each forwards to the studio **agent API** (`STU
 - **Errors.** On failure a tool returns result text `{ "error": { "code", "message", "issues"? } }`. Codes: `not_found`, `validation_failed`, `version_conflict`, `conflict`, `lifecycle_gated`, `forbidden`, `bad_request`, `rate_limited`, `unauthorized`, `internal_error`. `issues[]` accompanies `validation_failed`.
 - **Pagination.** List tools take `limit` (default 25, max 100) and `cursor`, and return `{ items, nextCursor }` (the cursor wraps the API's page number).
 
-Each tool lists its **input**, **output**, and the backing `/api/agent` call.
+Each tool lists its **input**, **output**, and the backing API call (shown in legacy `/api/agent/*` form; the client rewrites it onto `/api/v1/projects/{projectId}/*` at request time).
 
 ## Context & schema
 
