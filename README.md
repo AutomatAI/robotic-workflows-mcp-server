@@ -65,7 +65,9 @@ Streamable HTTP, stateless. The Vercel default URL (`https://robotic-workflows-m
 
 ## Connect a client
 
-Replace `pat_…` with your personal access token. A PAT spans every project you can access, so the target project is **connection-scoped**: add `&project_id=<uuid>` to the URL (or send an `x-project-id` header / set `STUDIO_DEFAULT_PROJECT_ID` on the server). Secrets tools additionally need the Doppler identifiers (`dopplerProject`/`dopplerConfig` tool inputs, or `STUDIO_DOPPLER_PROJECT`/`STUDIO_DOPPLER_CONFIG`).
+Replace `pat_…` with your personal access token. A PAT spans every project you can access, so a target project must be selected — the primary way is the **`set_project` tool** (the agent calls it once with the project UUID; the server injects it into every subsequent API call, best-effort warm-instance memory that self-heals via a "Missing project id" error → re-call `set_project`). Alternatively pin it on the connection: `&project_id=<uuid>` on the URL, an `x-project-id` header, or `STUDIO_DEFAULT_PROJECT_ID` on the server (`set_project` overrides all three). Secrets tools additionally need the Doppler identifiers (`dopplerProject`/`dopplerConfig` tool inputs, or `STUDIO_DOPPLER_PROJECT`/`STUDIO_DOPPLER_CONFIG`).
+
+**Token tiers:** read tokens list/inspect (no definition JSON — `read_workflow` `full`/`node` need an authorship-tier PAT; `graph` degrades gracefully); write tokens also run workflows / stop sessions / complete HITL tasks; workflow, schedule, secret, and resource mutations need authorship (author role + write token). Tier ledger: studio `docs/PROGRAMMATIC_ACCESS.md`.
 
 **Claude web / desktop** — Settings → Connectors → Add custom connector → URL:
 
