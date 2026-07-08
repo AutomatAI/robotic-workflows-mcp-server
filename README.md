@@ -32,7 +32,7 @@ Live, and "done" is verifiable by the model with no human in the loop:
 
 - **Responding URL** — `https://workflows.runautomat.com/api/mcp` answers `tools/list` and `tools/call` over Streamable HTTP.
 - **Connect any MCP client** with a project key (see [Connect a client](#connect-a-client)) and run the loop: `get_docs` → `create_workflow` → `run_workflow` → `get_run`.
-- **Acceptance checklist (rubric).** (1) endpoint lists **32 tools**; (2) `create_workflow` + `edit_workflow(patch)` each save a new version; (3) `run_workflow` → `get_run` returns `status:"completed"` with structured `output`; (4) a browser workflow returns a `recordingUrl`.
+- **Acceptance checklist (rubric).** (1) endpoint lists **33 tools**; (2) `create_workflow` + `edit_workflow(patch)` each save a new version; (3) `run_workflow` → `get_run` returns `status:"completed"` with structured `output`; (4) a browser workflow returns a `recordingUrl`.
 
 ## How Claude built it (Opus 4.8)
 
@@ -106,7 +106,7 @@ vercel --prod        # deploy (requires vercel login)
 
 # Tools
 
-Live reference for the 32 tools. Each forwards to the studio **public v1 API** (`STUDIO_API_BASE_URL` + `/api/v1/projects/{projectId}/*`), passing the caller's PAT; the project comes from the connection (`project_id`). The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
+Live reference for the 33 tools. Each forwards to the studio **public v1 API** (`STUDIO_API_BASE_URL` + `/api/v1/projects/{projectId}/*`), passing the caller's PAT; the project comes from the connection (`project_id`). The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
 
 ## Conventions
 
@@ -119,6 +119,12 @@ Live reference for the 32 tools. Each forwards to the studio **public v1 API** (
 Each tool lists its **input**, **output**, and the backing API call (shown in legacy `/api/agent/*` form; the client rewrites it onto `/api/v1/projects/{projectId}/*` at request time).
 
 ## Context & schema
+
+### `set_project`
+Selects the target Studio project for every subsequent call — **call first** when the connection has no `?project_id=`. Validates access with a lightweight probe (403 = outside the token's allowlist, 404 = unknown). Best-effort warm-instance memory: a "Missing project id" error later just means "call `set_project` again".
+- Input: `{ projectId }` (UUID)
+- Output: `{ projectId, validated: true }`
+- → probes `GET /api/agent/workflows?pageSize=1`
 
 ### `get_docs`
 Authoring guide — **call first**. How to write `code`/`decision` nodes: globals (`$('NodeName')`, `fetch`, `secrets`, `page`/`context`, `logger`), async/`return` semantics, node types, browser/recording, schedules, and worked examples.
@@ -155,7 +161,8 @@ Authoring guide — **call first**. How to write `code`/`decision` nodes: global
 ### `read_workflow`
 - Input: `{ workflowId, view: 'graph' | 'node' | 'full', nodeName? }` (`nodeName` required for `node`)
 - Output: `{ _meta: { workflowId, versionId, versionNumber, status, apiEnabled, apiUrlSlug }, ... }` — `graph` (nodes/edges + metadata, no node code), `node` (one node), `full` (entire definition). Pass `_meta.versionId` to `edit_workflow`.
-- → `GET /api/agent/workflows/{id}`; `graph`/`node` views derived client-side.
+- Tiers: `full`/`node` return definition JSON → authorship-tier PAT required (403 `forbidden` otherwise); `graph` works with any token, degrading to the server's lean names/types+edges view without authorship.
+- → `GET /api/agent/workflows/{id}?view=…`; the rich `graph` projection derives from `view=full`, falling back to the server's `view=graph` on a tier 403.
 
 ### `update_workflow`
 - Input: `{ workflowId, name?, description?, status?, apiEnabled?, apiUrlSlug? }`
