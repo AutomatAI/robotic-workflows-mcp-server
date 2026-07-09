@@ -130,6 +130,10 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
   if (path.startsWith("/api/agent/")) {
     if (path === "/api/agent/schema") {
       resolvedPath = "/api/v1/schema";
+    } else if (path === "/api/agent/projects") {
+      // Project DISCOVERY — the one list that exists to find a projectId,
+      // so it must not require one.
+      resolvedPath = "/api/v1/projects";
     } else {
       const projectId = rememberedProjectId() ?? callerProject.getStore();
       if (!projectId) {
@@ -465,13 +469,34 @@ const baseHandler = createMcpHandler(
   (server) => {
     // ---- Context & schema ----
     server.registerTool(
+      "list_projects",
+      {
+        title: "List projects",
+        description:
+          "Lists the projects this token can access (id + name), for picking a set_project target. Allowlist-scoped tokens see only their allowlisted projects. Returns: { items: [{ projectId, name }], nextCursor }.",
+        inputSchema: { limit, cursor },
+        annotations: RO,
+      },
+      async ({ limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", "/api/agent/projects", { query: { page, pageSize: lim ?? 25 } });
+          const items = (r.projects ?? []).map((p: any) => ({ projectId: p.id, name: p.name }));
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
       "set_project",
       {
         title: "Set project",
         description:
           "Sets the target Studio project for every subsequent tool call (a PAT spans all your projects, so one must be selected). Validates access with a lightweight probe before storing. Call this FIRST if tools error with 'Missing project id', and to switch projects mid-session. The selection is remembered server-side best-effort — if it is ever forgotten (cold start), calls error with 'Missing project id' again: just re-run set_project. Returns: { projectId, validated: true }.",
         inputSchema: {
-          projectId: z.string().uuid().describe("The Studio project UUID (visible in the studio URL)."),
+          projectId: z.string().uuid().describe("The Studio project UUID — discover it with list_projects."),
         },
         annotations: UPSERT,
       },
@@ -479,18 +504,22 @@ const baseHandler = createMcpHandler(
         try {
           const bucket = tokenBucket();
           if (!bucket) throw new ApiError(401, "unauthorized", "Missing API key.");
-          // Store-then-probe so the probe resolves the candidate project through
-          // the normal path; roll back on failure (403 = outside the token's
-          // allowlist or wrong org, 404 = unknown project).
-          const previous = rememberedProject.get(bucket);
-          rememberProject(projectId);
-          try {
-            await api("GET", "/api/agent/workflows", { query: { pageSize: 1 } });
-          } catch (e) {
-            if (previous) rememberedProject.set(bucket, previous);
-            else rememberedProject.delete(bucket);
-            return fail(e);
+          // Validate against the DISCOVERY listing (an all-projects token gets
+          // an empty-but-200 workflows list even for a nonexistent project id,
+          // so probing a project-scoped route can't tell a typo from an empty
+          // project). Walk the pages until the id shows up.
+          let found = false;
+          for (let page = 1; page <= 20 && !found; page++) {
+            const r = await api("GET", "/api/agent/projects", { query: { page, pageSize: 100 } });
+            found = (r.projects ?? []).some((p: any) => p.id === projectId);
+            if (page >= (r.totalPages ?? 1)) break;
           }
+          if (!found) {
+            return result({
+              error: { code: "not_found", message: `Project ${projectId} is not accessible to this token — call list_projects to see the available projects.` },
+            });
+          }
+          rememberProject(projectId);
           return result({ projectId, validated: true });
         } catch (e) {
           return fail(e);
@@ -1321,7 +1350,7 @@ const baseHandler = createMcpHandler(
   {
     serverInfo: { name: "automat-robotic-workflows", version: "0.4.0" },
     instructions:
-      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project with the set_project tool (call it first; re-call it if a tool errors with 'Missing project id') — or pin one on the connection via ?project_id=<uuid> / x-project-id / STUDIO_DEFAULT_PROJECT_ID. Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
+      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: list_projects to discover ids, then set_project (re-call it if a tool errors with 'Missing project id') — or pin one on the connection via ?project_id=<uuid> / x-project-id / STUDIO_DEFAULT_PROJECT_ID. Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
       "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit_workflow with a small patch (validates and saves a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
       "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",
   },
