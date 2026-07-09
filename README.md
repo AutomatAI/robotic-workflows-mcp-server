@@ -32,7 +32,7 @@ Live, and "done" is verifiable by the model with no human in the loop:
 
 - **Responding URL** — `https://workflows.runautomat.com/api/mcp` answers `tools/list` and `tools/call` over Streamable HTTP.
 - **Connect any MCP client** with a project key (see [Connect a client](#connect-a-client)) and run the loop: `get_docs` → `create_workflow` → `run_workflow` → `get_run`.
-- **Acceptance checklist (rubric).** (1) endpoint lists **32 tools**; (2) `create_workflow` + `edit_workflow(patch)` each save a new version; (3) `run_workflow` → `get_run` returns `status:"completed"` with structured `output`; (4) a browser workflow returns a `recordingUrl`.
+- **Acceptance checklist (rubric).** (1) endpoint lists **34 tools**; (2) `create_workflow` + `edit_workflow(patch)` each save a new version; (3) `run_workflow` → `get_run` returns `status:"completed"` with structured `output`; (4) a browser workflow returns a `recordingUrl`.
 
 ## How Claude built it (Opus 4.8)
 
@@ -48,43 +48,47 @@ Streamable HTTP, stateless. The Vercel default URL (`https://robotic-workflows-m
 
 ## Authentication
 
-**Pass-through.** The caller supplies a project-scoped studio key (`ak_…`); the server forwards it to the studio API per request. No keys are stored or committed. The key is read three ways (checked in order):
+**Pass-through.** The caller supplies a Studio **personal access token** (`pat_…`, minted in Studio → Settings → Personal access tokens); the server forwards it as a Bearer to the studio public v1 API per request. No tokens are stored or committed. The token is read three ways (checked in order):
 
 | Source | Use |
 | --- | --- |
-| `?api_key=ak_…` query param | Claude web/desktop connector (its UI has no header field) |
-| `x-api-key: ak_…` header | generic clients |
-| `Authorization: Bearer ak_…` header | Claude Code CLI |
+| `?api_key=pat_…` query param | Claude web/desktop connector (its UI has no header field) |
+| `x-api-key: pat_…` header | generic clients |
+| `Authorization: Bearer pat_…` header | Claude Code CLI |
 
 ## Configuration (Vercel env)
 
 | Var | Purpose |
 | --- | --- |
-| `STUDIO_API_BASE_URL` | Origin of the studio agent API. **Studio preview URLs change per deploy** — update this each studio redeploy (or point at a stable alias once preview protection is lifted). |
-| `VERCEL_AUTOMATION_BYPASS_SECRET` | Optional — only if the studio deployment is protected. |
+| `STUDIO_API_BASE_URL` | Origin of the studio API. **Production: `https://studio.runautomat.com`** (stable). For a studio *preview* deploy, use that preview's URL (it changes per deploy). No trailing slash needed. |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | **Leave UNSET for production** (the `studio.runautomat.com` custom domain is public). Set it only when `STUDIO_API_BASE_URL` points at a protection-enabled preview deploy. |
+
+**Auth note:** a PAT is scoped to the studio environment it was minted in. Use a token minted at `https://studio.runautomat.com/settings` for production — a preview/staging token will 401 against prod (different database).
 
 ## Connect a client
 
-Replace `ak_…` with your project-scoped studio key.
+Replace `pat_…` with your personal access token. A PAT spans every project you can access, so a target project must be selected — the primary way is the **`set_project` tool** (the agent calls it once with the project UUID; the server injects it into every subsequent API call, best-effort warm-instance memory that self-heals via a "Missing project id" error → re-call `set_project`). Alternatively pin it on the connection: `&project_id=<uuid>` on the URL, an `x-project-id` header, or `STUDIO_DEFAULT_PROJECT_ID` on the server (`set_project` overrides all three). Secrets tools additionally need the Doppler identifiers (`dopplerProject`/`dopplerConfig` tool inputs, or `STUDIO_DOPPLER_PROJECT`/`STUDIO_DOPPLER_CONFIG`).
+
+**Token tiers:** read tokens list/inspect (no definition JSON — `read_workflow` `full`/`node` need an authorship-tier PAT; `graph` degrades gracefully); write tokens also run workflows / stop sessions / complete HITL tasks; workflow, schedule, secret, and resource mutations need authorship (author role + write token). Tier ledger: studio `docs/PROGRAMMATIC_ACCESS.md`.
 
 **Claude web / desktop** — Settings → Connectors → Add custom connector → URL:
 
 ```
-https://workflows.runautomat.com/api/mcp?api_key=ak_…
+https://workflows.runautomat.com/api/mcp?api_key=pat_…&project_id=<uuid>
 ```
 
 **Claude Code**
 
 ```bash
 claude mcp add --transport http automat \
-  "https://workflows.runautomat.com/api/mcp?api_key=ak_…"
+  "https://workflows.runautomat.com/api/mcp?api_key=pat_…&project_id=<uuid>"
 ```
 
 **MCP Inspector**
 
 ```bash
 npx @modelcontextprotocol/inspector
-# Streamable HTTP → https://workflows.runautomat.com/api/mcp?api_key=ak_…
+# Streamable HTTP → https://workflows.runautomat.com/api/mcp?api_key=pat_…&project_id=<uuid>
 ```
 
 ## Development
@@ -104,7 +108,7 @@ vercel --prod        # deploy (requires vercel login)
 
 # Tools
 
-Live reference for the 32 tools. Each forwards to the studio **agent API** (`STUDIO_API_BASE_URL` + `/api/agent/*`), passing the caller's project-scoped key; the project is resolved from the key. The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
+Live reference for the 34 tools. Each forwards to the studio **public v1 API** (`STUDIO_API_BASE_URL` + `/api/v1/projects/{projectId}/*`), passing the caller's PAT; the project comes from the connection (`project_id`). The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
 
 ## Conventions
 
@@ -114,9 +118,21 @@ Live reference for the 32 tools. Each forwards to the studio **agent API** (`STU
 - **Errors.** On failure a tool returns result text `{ "error": { "code", "message", "issues"? } }`. Codes: `not_found`, `validation_failed`, `version_conflict`, `conflict`, `lifecycle_gated`, `forbidden`, `bad_request`, `rate_limited`, `unauthorized`, `internal_error`. `issues[]` accompanies `validation_failed`.
 - **Pagination.** List tools take `limit` (default 25, max 100) and `cursor`, and return `{ items, nextCursor }` (the cursor wraps the API's page number).
 
-Each tool lists its **input**, **output**, and the backing `/api/agent` call.
+Each tool lists its **input**, **output**, and the backing API call (shown in legacy `/api/agent/*` form; the client rewrites it onto `/api/v1/projects/{projectId}/*` at request time).
 
 ## Context & schema
+
+### `list_projects`
+Discovery — the projects this token can access (allowlist-scoped tokens see only their allowlist). Use it to pick a `set_project` target.
+- Input: `{ limit?, cursor? }`
+- Output: `{ items: [{ projectId, name }], nextCursor }`
+- → `GET /api/v1/projects` (the one project-agnostic list)
+
+### `set_project`
+Selects the target Studio project for every subsequent call — **call first** when the connection has no `?project_id=`. Validates the id against the `list_projects` discovery listing (a project-scoped probe can't tell a typo from an empty project on an all-projects token). Best-effort warm-instance memory: a "Missing project id" error later just means "call `set_project` again".
+- Input: `{ projectId }` (UUID — discover via `list_projects`)
+- Output: `{ projectId, validated: true }`
+- → validates via `GET /api/v1/projects`
 
 ### `get_docs`
 Authoring guide — **call first**. How to write `code`/`decision` nodes: globals (`$('NodeName')`, `fetch`, `secrets`, `page`/`context`, `logger`), async/`return` semantics, node types, browser/recording, schedules, and worked examples.
@@ -153,7 +169,8 @@ Authoring guide — **call first**. How to write `code`/`decision` nodes: global
 ### `read_workflow`
 - Input: `{ workflowId, view: 'graph' | 'node' | 'full', nodeName? }` (`nodeName` required for `node`)
 - Output: `{ _meta: { workflowId, versionId, versionNumber, status, apiEnabled, apiUrlSlug }, ... }` — `graph` (nodes/edges + metadata, no node code), `node` (one node), `full` (entire definition). Pass `_meta.versionId` to `edit_workflow`.
-- → `GET /api/agent/workflows/{id}`; `graph`/`node` views derived client-side.
+- Tiers: `full`/`node` return definition JSON → authorship-tier PAT required (403 `forbidden` otherwise); `graph` works with any token, degrading to the server's lean names/types+edges view without authorship.
+- → `GET /api/agent/workflows/{id}?view=…`; the rich `graph` projection derives from `view=full`, falling back to the server's `view=graph` on a tier 403.
 
 ### `update_workflow`
 - Input: `{ workflowId, name?, description?, status?, apiEnabled?, apiUrlSlug? }`

@@ -1,14 +1,20 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
+import { createHash } from "node:crypto";
 
 /**
  * Automat Robotic Workflows MCP Server.
  *
  * Stateless Streamable-HTTP endpoint (plain Vercel Function). Each tool forwards
- * to the studio "thin client" — the project-scoped v1 API under /api/agent/... —
- * authenticating with a project-scoped key (ak_...). The project is resolved
- * from that key server-side, so no projectId is sent.
+ * to the studio public v1 API under /api/v1/projects/{projectId}/..., authenticating
+ * with a Personal Access Token (pat_...) that acts as its owning user.
+ *
+ * Because a PAT spans every project its user can access, the target project can
+ * no longer be resolved from the credential — it is CONNECTION-scoped: pass
+ * `?project_id=<uuid>` on the MCP URL (or the `x-project-id` header, or set
+ * STUDIO_DEFAULT_PROJECT_ID on the server). To work across multiple projects,
+ * register the connector once per project.
  *
  * Contract reference: README.md (Tools section).
  */
@@ -25,10 +31,50 @@ const VERCEL_BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 // run_workflow defaults environment→'preview' and branch→this value.
 const STUDIO_RUN_BRANCH = process.env.STUDIO_RUN_BRANCH || undefined;
 
-// Pass-through auth: the caller supplies their project-scoped studio key (ak_…) as
-// the connector api key; we forward it per-request to the studio v1 API. Nothing
-// is stored or committed. Held in async-local storage for the request's lifetime.
+// Pass-through auth: the caller supplies their Studio personal access token
+// (pat_…) as the connector api key; we forward it per-request as a Bearer to the
+// studio v1 API. Nothing is stored or committed. Held in async-local storage for
+// the request's lifetime.
 const callerKey = new AsyncLocalStorage<string>();
+// Connection-scoped target project (a PAT spans projects, so the credential no
+// longer implies one). Resolved per request: ?project_id= → x-project-id header
+// → STUDIO_DEFAULT_PROJECT_ID env.
+const callerProject = new AsyncLocalStorage<string>();
+const STUDIO_DEFAULT_PROJECT_ID = process.env.STUDIO_DEFAULT_PROJECT_ID || undefined;
+
+// set_project state: the agent-selected project, keyed by a hash of the caller's
+// token. BEST-EFFORT by design — this is warm-instance memory on a stateless
+// serverless function, so a cold start or a different instance forgets it. That
+// is self-healing: the next project-scoped call errors with "Missing project id"
+// and the agent re-runs set_project. Precedence: set_project > ?project_id=
+// connection param / x-project-id header > STUDIO_DEFAULT_PROJECT_ID.
+const rememberedProject = new Map<string, { projectId: string; at: number }>();
+const REMEMBERED_PROJECT_TTL_MS = 6 * 60 * 60 * 1000;
+const REMEMBERED_PROJECT_MAX = 1000;
+
+function tokenBucket(): string | null {
+  const key = callerKey.getStore();
+  return key ? createHash("sha256").update(key).digest("hex") : null;
+}
+
+function rememberedProjectId(): string | undefined {
+  const bucket = tokenBucket();
+  if (!bucket) return undefined;
+  const entry = rememberedProject.get(bucket);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > REMEMBERED_PROJECT_TTL_MS) {
+    rememberedProject.delete(bucket);
+    return undefined;
+  }
+  return entry.projectId;
+}
+
+function rememberProject(projectId: string): void {
+  const bucket = tokenBucket();
+  if (!bucket) return;
+  if (rememberedProject.size >= REMEMBERED_PROJECT_MAX) rememberedProject.clear();
+  rememberedProject.set(bucket, { projectId, at: Date.now() });
+}
 
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -46,6 +92,15 @@ function extractKey(req: Request): string | null {
   const auth = req.headers.get("authorization");
   if (auth) return auth.replace(/^Bearer\s+/i, "").trim();
   return null;
+}
+
+function extractProjectId(req: Request): string | undefined {
+  return (
+    new URL(req.url).searchParams.get("project_id") ??
+    req.headers.get("x-project-id") ??
+    STUDIO_DEFAULT_PROJECT_ID ??
+    undefined
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +122,31 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
   if (!STUDIO_API_BASE_URL) throw new ApiError(500, "config_error", "STUDIO_API_BASE_URL is not set on the MCP server.");
   const key = callerKey.getStore();
   if (!key) throw new ApiError(401, "unauthorized", "Missing API key.");
-  const url = new URL(STUDIO_API_BASE_URL + path);
+
+  // Single choke point for the /api/agent → /api/v1 repoint: every tool still
+  // names the legacy /api/agent/* path; it is rewritten here onto the PAT
+  // surface. `/api/agent/schema` is the one project-agnostic endpoint.
+  let resolvedPath = path;
+  if (path.startsWith("/api/agent/")) {
+    if (path === "/api/agent/schema") {
+      resolvedPath = "/api/v1/schema";
+    } else if (path === "/api/agent/projects") {
+      // Project DISCOVERY — the one list that exists to find a projectId,
+      // so it must not require one.
+      resolvedPath = "/api/v1/projects";
+    } else {
+      const projectId = rememberedProjectId() ?? callerProject.getStore();
+      if (!projectId) {
+        throw new ApiError(
+          400,
+          "config_error",
+          "Missing project id — call the set_project tool with the project UUID (preferred), or add ?project_id=<uuid> to the MCP URL / an x-project-id header / STUDIO_DEFAULT_PROJECT_ID."
+        );
+      }
+      resolvedPath = `/api/v1/projects/${projectId}/` + path.slice("/api/agent/".length);
+    }
+  }
+  const url = new URL(STUDIO_API_BASE_URL + resolvedPath);
   if (opts.query) {
     for (const [k, v] of Object.entries(opts.query)) {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -330,11 +409,20 @@ const UPSERT = { readOnlyHint: false, destructiveHint: false, idempotentHint: tr
 const REMOVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 
 // Shape mappers (API → our documented tool output)
+const metaOf = (w: any) => ({
+  workflowId: w.id,
+  versionId: w.activeVersionId ?? null,
+  versionNumber: w.activeVersionNumber ?? null,
+  status: w.status,
+  apiEnabled: w.apiEnabled,
+  apiUrlSlug: w.apiUrlSlug ?? null,
+});
+
 const mapWorkflow = (w: any) => ({
   workflowId: w.id,
   name: w.name,
   description: w.description ?? null,
-  status: w.lifecycle,
+  status: w.status,
   activeVersionId: w.activeVersionId ?? null,
   apiEnabled: w.apiEnabled,
   apiUrlSlug: w.apiUrlSlug ?? null,
@@ -344,10 +432,21 @@ const mapWorkflow = (w: any) => ({
 });
 
 // Resolve a secret/resource id by name (the v1 API addresses these by id).
-async function findSecretId(name: string): Promise<string | null> {
-  const r = await api("GET", "/api/agent/secrets", { query: { name, pageSize: 1 } });
-  return r.secrets?.[0]?.id ?? null;
+// Studio secrets are Doppler-backed and NAME-keyed; every secrets call must
+// identify the Doppler project slug + config name. Tool inputs override the
+// env defaults (STUDIO_DOPPLER_PROJECT / STUDIO_DOPPLER_CONFIG).
+const DOPPLER_PROJECT_DEFAULT = process.env.STUDIO_DOPPLER_PROJECT || undefined;
+const DOPPLER_CONFIG_DEFAULT = process.env.STUDIO_DOPPLER_CONFIG || undefined;
+function dopplerQuery(project?: string, config?: string): { project: string; config: string } {
+  const p = project ?? DOPPLER_PROJECT_DEFAULT;
+  const c = config ?? DOPPLER_CONFIG_DEFAULT;
+  if (!p || !c) {
+    throw new ApiError(400, "bad_request", "Secrets need a Doppler project + config — pass dopplerProject/dopplerConfig or set STUDIO_DOPPLER_PROJECT/STUDIO_DOPPLER_CONFIG.");
+  }
+  return { project: p, config: c };
 }
+const dopplerProjectInput = z.string().describe("Doppler project slug (defaults to STUDIO_DOPPLER_PROJECT).").optional();
+const dopplerConfigInput = z.string().describe("Doppler config name (defaults to STUDIO_DOPPLER_CONFIG).").optional();
 async function findResource(name: string, lifecycle?: string): Promise<any | null> {
   const r = await api("GET", "/api/agent/resources", { query: { name, lifecycle, pageSize: 1 } });
   return r.resources?.[0] ?? null;
@@ -369,6 +468,65 @@ const MIN_DEFINITION = (name: string) => ({
 const baseHandler = createMcpHandler(
   (server) => {
     // ---- Context & schema ----
+    server.registerTool(
+      "list_projects",
+      {
+        title: "List projects",
+        description:
+          "Lists the projects this token can access (id + name), for picking a set_project target. Allowlist-scoped tokens see only their allowlisted projects. Returns: { items: [{ projectId, name }], nextCursor }.",
+        inputSchema: { limit, cursor },
+        annotations: RO,
+      },
+      async ({ limit: lim, cursor: cur }) => {
+        try {
+          const page = toPage(cur);
+          const r = await api("GET", "/api/agent/projects", { query: { page, pageSize: lim ?? 25 } });
+          const items = (r.projects ?? []).map((p: any) => ({ projectId: p.id, name: p.name }));
+          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "set_project",
+      {
+        title: "Set project",
+        description:
+          "Sets the target Studio project for every subsequent tool call (a PAT spans all your projects, so one must be selected). Validates access with a lightweight probe before storing. Call this FIRST if tools error with 'Missing project id', and to switch projects mid-session. The selection is remembered server-side best-effort — if it is ever forgotten (cold start), calls error with 'Missing project id' again: just re-run set_project. Returns: { projectId, validated: true }.",
+        inputSchema: {
+          projectId: z.string().uuid().describe("The Studio project UUID — discover it with list_projects."),
+        },
+        annotations: UPSERT,
+      },
+      async ({ projectId }) => {
+        try {
+          const bucket = tokenBucket();
+          if (!bucket) throw new ApiError(401, "unauthorized", "Missing API key.");
+          // Validate against the DISCOVERY listing (an all-projects token gets
+          // an empty-but-200 workflows list even for a nonexistent project id,
+          // so probing a project-scoped route can't tell a typo from an empty
+          // project). Walk the pages until the id shows up.
+          let found = false;
+          for (let page = 1; page <= 20 && !found; page++) {
+            const r = await api("GET", "/api/agent/projects", { query: { page, pageSize: 100 } });
+            found = (r.projects ?? []).some((p: any) => p.id === projectId);
+            if (page >= (r.totalPages ?? 1)) break;
+          }
+          if (!found) {
+            return result({
+              error: { code: "not_found", message: `Project ${projectId} is not accessible to this token — call list_projects to see the available projects.` },
+            });
+          }
+          rememberProject(projectId);
+          return result({ projectId, validated: true });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
     server.registerTool(
       "list_runtime_versions",
       {
@@ -469,7 +627,7 @@ const baseHandler = createMcpHandler(
             workflowId: r.workflow?.id,
             versionId: r.version?.id,
             versionNumber: r.version?.versionNumber,
-            status: r.workflow?.lifecycle ?? "development",
+            status: r.workflow?.status ?? "development",
           });
         } catch (e) {
           return fail(e);
@@ -489,7 +647,7 @@ const baseHandler = createMcpHandler(
       async ({ workflowId, name }) => {
         try {
           const src = await api("GET", `/api/agent/workflows/${workflowId}`);
-          const def = src.workflow?.activeVersion?.definition;
+          const def = src.workflow?.definition;
           if (!def) return result({ error: { code: "not_found", message: "Source workflow has no active version to copy." } });
           const newName = name ?? `Copy of ${src.workflow?.name ?? "workflow"}`;
           const created = { ...def, name: newName };
@@ -506,7 +664,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Read workflow",
         description:
-          "Reads a workflow's active definition. ALWAYS read before editing. view: 'graph' (nodes/edges + metadata, no node code), 'node' (one node, needs nodeName), 'full' (entire definition). Returns the view plus _meta — pass _meta.versionId as expectedActiveVersionId to edit_workflow.",
+          "Reads a workflow's active definition. ALWAYS read before editing. view: 'graph' (nodes/edges + metadata, no node code), 'node' (one node, needs nodeName), 'full' (entire definition). TIERS: 'full' and 'node' return definition JSON and require an authorship-tier PAT (author role + write token) — expect a 403 'forbidden' otherwise; 'graph' works with any token (degrading to node names/types + edges without authorship). Returns the view plus _meta — pass _meta.versionId as expectedActiveVersionId to edit_workflow.",
         inputSchema: {
           workflowId: z.string(),
           view: z.enum(["graph", "node", "full"]),
@@ -516,26 +674,42 @@ const baseHandler = createMcpHandler(
       },
       async ({ workflowId, view, nodeName }) => {
         try {
-          const r = await api("GET", `/api/agent/workflows/${workflowId}`);
+          if (view === "node" && !nodeName) {
+            return result({ error: { code: "bad_request", message: "nodeName is required when view='node'." } });
+          }
+          // Definition JSON (view full/node) is AUTHORSHIP-tier on the studio
+          // API. full/node pass the view through and surface the server's 403
+          // for read/write-only tokens. graph tries the rich client-side
+          // projection first (needs the full definition) and degrades to the
+          // server's lean view=graph (names/types + edges) on a tier 403.
+          const apiView = view === "graph" ? "full" : view;
+          let r: any;
+          try {
+            r = await api("GET", `/api/agent/workflows/${workflowId}`, { query: { view: apiView, nodeName } });
+          } catch (e) {
+            if (view === "graph" && e instanceof ApiError && e.status === 403) {
+              const lean = await api("GET", `/api/agent/workflows/${workflowId}`, { query: { view: "graph" } });
+              const lw = lean.workflow;
+              if (!lw) return result({ error: { code: "not_found", message: "Workflow not found." } });
+              return result({
+                _meta: metaOf(lw),
+                ...(lw.graph ?? {}),
+                note: "Lean graph (node names/types + edges): this token has no authorship tier, so the definition-derived fields (positions, expressions, schemas, settings) are unavailable.",
+              });
+            }
+            throw e;
+          }
           const w = r.workflow;
           if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
-          const def = w.activeVersion?.definition ?? null;
-          const meta = {
-            workflowId: w.id,
-            versionId: w.activeVersionId ?? null,
-            versionNumber: w.activeVersion?.versionNumber ?? null,
-            status: w.lifecycle,
-            apiEnabled: w.apiEnabled,
-            apiUrlSlug: w.apiUrlSlug ?? null,
-          };
-          if (!def) return result({ _meta: meta, definition: null, note: "Workflow has no active version yet." });
+          const meta = metaOf(w);
           if (view === "node") {
-            if (!nodeName) return result({ error: { code: "bad_request", message: "nodeName is required when view='node'." } });
-            const node = (def.nodes ?? []).find((n: any) => n.name === nodeName);
-            return node ? result({ _meta: meta, node }) : result({ error: { code: "not_found", message: `No node named "${nodeName}".` } });
+            // Server-resolved: a missing node 404s at the API and surfaces via fail().
+            return result({ _meta: meta, node: w.node ?? null });
           }
+          const def = w.definition ?? null;
+          if (!def) return result({ _meta: meta, definition: null, note: "Workflow has no active version yet." });
           if (view === "full") return result({ _meta: meta, definition: def });
-          // graph: strip per-node code/execute, keep routing-critical fields
+          // graph (rich): strip per-node code/execute, keep routing-critical fields
           const nodes = (def.nodes ?? []).map((n: any) => ({
             name: n.name, type: n.type, position: n.position,
             ...(n.mode ? { mode: n.mode } : {}),
@@ -626,7 +800,7 @@ const baseHandler = createMcpHandler(
           const cur = await api("GET", `/api/agent/workflows/${workflowId}`);
           const w = cur.workflow;
           if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
-          const current = w.activeVersion?.definition;
+          const current = w.definition;
           if (!current) return result({ error: { code: "bad_request", message: "Workflow has no version to edit. Create one first." } });
           let next: any;
           try {
@@ -757,13 +931,19 @@ const baseHandler = createMcpHandler(
         try {
           const body: Record<string, unknown> = {
             name: name ?? null,
-            recurrence_rule: recurrenceRule,
-            start_at: startAt,
-            input_resource_name: inputResourceName ?? null,
+            recurrenceRule,
+            startAt,
+            inputResourceName: inputResourceName ?? null,
           };
-          if (enabled !== undefined) body.status = enabled ? "active" : "paused";
           const r = await api("POST", `/api/agent/workflows/${workflowId}/schedules`, { body });
-          return result({ scheduleId: r.schedule?.id });
+          const scheduleId = r.schedule?.id;
+          // v1 create derives the initial status from workflow triggerability and
+          // ignores a client status, so honor enabled:false with a follow-up pause
+          // (ergonomics compose in the MCP, not the CRUD route).
+          if (scheduleId && enabled === false && r.schedule?.status !== "paused") {
+            await api("PATCH", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`, { body: { status: "paused" } });
+          }
+          return result({ scheduleId });
         } catch (e) {
           return fail(e);
         }
@@ -790,9 +970,9 @@ const baseHandler = createMcpHandler(
         try {
           const body: Record<string, unknown> = {};
           if (name !== undefined) body.name = name;
-          if (recurrenceRule !== undefined) body.recurrence_rule = recurrenceRule;
-          if (startAt !== undefined) body.start_at = startAt;
-          if (inputResourceName !== undefined) body.input_resource_name = inputResourceName;
+          if (recurrenceRule !== undefined) body.recurrenceRule = recurrenceRule;
+          if (startAt !== undefined) body.startAt = startAt;
+          if (inputResourceName !== undefined) body.inputResourceName = inputResourceName;
           if (enabled !== undefined) body.status = enabled ? "active" : "paused";
           const r = await api("PATCH", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`, { body });
           return result({ scheduleId: r.schedule?.id ?? scheduleId });
@@ -813,7 +993,7 @@ const baseHandler = createMcpHandler(
       async ({ workflowId, scheduleId }) => {
         try {
           const r = await api("DELETE", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`);
-          return result({ success: r.success === true, scheduleId });
+          return result({ success: r.deleted === true, scheduleId });
         } catch (e) {
           return fail(e);
         }
@@ -839,7 +1019,7 @@ const baseHandler = createMcpHandler(
         try {
           const env = environment ?? (STUDIO_RUN_BRANCH ? "preview" : undefined);
           const br = branch ?? (env === "preview" ? STUDIO_RUN_BRANCH : undefined);
-          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { query: { environment: env, branch: br }, body: input ?? {} });
+          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { body: { input: input ?? {}, environment: env, branch: br } });
           return result({ sessionId: r.sessionId, status: r.status ?? "queued" });
         } catch (e) {
           return fail(e);
@@ -862,7 +1042,7 @@ const baseHandler = createMcpHandler(
           let items = (r.sessions ?? []).map((s: any) => ({
             sessionId: s.id, workflowId: s.workflowId, status: s.status, source: s.source ?? null,
             startedAt: s.startedAt ?? null, endedAt: s.endedAt ?? null,
-            durationMs: s.durationSeconds != null ? Math.round(s.durationSeconds * 1000) : null,
+            durationMs: durMs(s.startedAt, s.endedAt),
           }));
           if (status) items = items.filter((s: any) => s.status === status);
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
@@ -877,7 +1057,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Get run",
         description:
-          "Returns a run's status and result; add `include` for deeper data. include: 'timeline' (per-node status+timing), 'io' (per-node input/output), 'logs' (paginated; reconstructed from node timing), 'recording' (browser video URL when available). Omit include for a lightweight summary.",
+          "Returns a run's status and result; add `include` for deeper data. include: 'timeline' (per-node status+timing), 'io' (per-node input/output), 'logs' (currently always null — the studio retains no queryable log store; use timeline/io), 'recording' (browser video URL when available). Omit include for a lightweight summary.",
         inputSchema: {
           sessionId: z.string(),
           include: z.array(z.enum(["timeline", "io", "logs", "recording"])).optional(),
@@ -895,7 +1075,7 @@ const baseHandler = createMcpHandler(
             sessionId: s.id, workflowId: s.workflowId, versionId: s.workflowVersionId ?? null,
             status: s.status, source: s.source ?? null, input: s.inputData ?? null, output: s.outputData ?? null,
             startedAt: s.startedAt ?? null, endedAt: s.endedAt ?? null,
-            durationMs: s.durationSeconds != null ? Math.round(s.durationSeconds * 1000) : null,
+            durationMs: durMs(s.startedAt, s.endedAt),
           };
           if (inc.has("timeline") || inc.has("io")) {
             const n = await api("GET", `/api/agent/sessions/${sessionId}/nodes`);
@@ -912,8 +1092,12 @@ const baseHandler = createMcpHandler(
               const lg = await api("GET", `/api/agent/sessions/${sessionId}/logs`, { query: { cursor: logsCursor } });
               out.logs = { entries: lg.logs ?? [], nextCursor: lg.nextCursor ?? null };
             } catch {
+              // The studio has no queryable log store by design (the logs
+              // endpoint returns an honest 404, not a deployment gap). Per-node
+              // execution data lives in the timeline/io includes instead.
               out.logs = null;
-              out.logsNote = "Logs unavailable (the session logs endpoint is not deployed yet).";
+              out.logsNote =
+                "The studio does not retain queryable execution logs. Use include:['timeline','io'] for the per-node timeline and inputs/outputs.";
             }
           }
           return result(out);
@@ -989,16 +1173,16 @@ const baseHandler = createMcpHandler(
       "list_secrets",
       {
         title: "List secrets",
-        description: "Lists the project's secret names and metadata (values are never returned). Returns: { items: [{ key, last4, lifecycle, updatedAt }], nextCursor }.",
-        inputSchema: { lifecycle: Lifecycle.optional(), limit, cursor },
+        description: "Lists the Doppler config's secret NAMES (values are never returned). Returns: { items: [{ key }], dopplerConfigured, nextCursor }.",
+        inputSchema: { dopplerProject: dopplerProjectInput, dopplerConfig: dopplerConfigInput, limit, cursor },
         annotations: RO,
       },
-      async ({ lifecycle, limit: lim, cursor: cur }) => {
+      async ({ dopplerProject, dopplerConfig, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", "/api/agent/secrets", { query: { lifecycle, page, pageSize: lim ?? 25 } });
-          const items = (r.secrets ?? []).map((s: any) => ({ key: s.name, last4: s.last4 ?? null, lifecycle: s.lifecycle ?? null, updatedAt: s.updatedAt }));
-          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+          const r = await api("GET", "/api/agent/secrets", { query: { ...dopplerQuery(dopplerProject, dopplerConfig), page, pageSize: lim ?? 25 } });
+          const items = (r.secrets ?? []).map((name: string) => ({ key: name }));
+          return result({ items, dopplerConfigured: r.dopplerConfigured !== false, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
           return fail(e);
         }
@@ -1011,17 +1195,19 @@ const baseHandler = createMcpHandler(
         title: "Set secrets",
         description: "Creates or updates one or more project secrets (upsert by key). Values are write-only. Returns: { updated: [keys] }.",
         inputSchema: {
-          secrets: z.array(z.object({ key: z.string(), value: z.string(), description: z.string().optional(), lifecycle: Lifecycle.optional() })).min(1),
+          secrets: z.array(z.object({ key: z.string(), value: z.string() })).min(1),
+          dopplerProject: dopplerProjectInput,
+          dopplerConfig: dopplerConfigInput,
         },
         annotations: UPSERT,
       },
-      async ({ secrets }) => {
+      async ({ secrets, dopplerProject, dopplerConfig }) => {
         try {
+          const query = dopplerQuery(dopplerProject, dopplerConfig);
           const updated: string[] = [];
           for (const s of secrets) {
-            const id = await findSecretId(s.key);
-            if (id) await api("PUT", `/api/agent/secrets/${id}`, { body: { value: s.value, lifecycle: s.lifecycle } });
-            else await api("POST", "/api/agent/secrets", { body: { name: s.key, value: s.value, lifecycle: s.lifecycle } });
+            // Name-keyed upsert — PUT creates or updates; the value is write-only.
+            await api("PUT", `/api/agent/secrets/${encodeURIComponent(s.key)}`, { query, body: { value: s.value } });
             updated.push(s.key);
           }
           return result({ updated });
@@ -1036,14 +1222,12 @@ const baseHandler = createMcpHandler(
       {
         title: "Delete secret",
         description: "Deletes a project secret by key. Returns: { success: true }.",
-        inputSchema: { key: z.string() },
+        inputSchema: { key: z.string(), dopplerProject: dopplerProjectInput, dopplerConfig: dopplerConfigInput },
         annotations: REMOVE,
       },
-      async ({ key }) => {
+      async ({ key, dopplerProject, dopplerConfig }) => {
         try {
-          const id = await findSecretId(key);
-          if (!id) return result({ error: { code: "not_found", message: `No secret named "${key}".` } });
-          await api("DELETE", `/api/agent/secrets/${id}`);
+          await api("DELETE", `/api/agent/secrets/${encodeURIComponent(key)}`, { query: dopplerQuery(dopplerProject, dopplerConfig) });
           return result({ success: true, key });
         } catch (e) {
           return fail(e);
@@ -1176,7 +1360,7 @@ const baseHandler = createMcpHandler(
   {
     serverInfo: { name: "automat-robotic-workflows", version: "0.4.0" },
     instructions:
-      "Build, run, and manage Automat RPA workflows in one project (the API key resolves the project; no project id is needed).\n\n" +
+      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: list_projects to discover ids, then set_project (re-call it if a tool errors with 'Missing project id') — or pin one on the connection via ?project_id=<uuid> / x-project-id / STUDIO_DEFAULT_PROJECT_ID. Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
       "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit_workflow with a small patch (validates and saves a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
       "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",
   },
@@ -1194,7 +1378,10 @@ const authed = async (req: Request): Promise<Response> => {
       headers: { "content-type": "application/json", ...corsHeaders },
     });
   }
-  return callerKey.run(key, () => baseHandler(req));
+  const projectId = extractProjectId(req);
+  return callerKey.run(key, () =>
+    projectId ? callerProject.run(projectId, () => baseHandler(req)) : baseHandler(req)
+  );
 };
 
 const handleOptions = (): Response => new Response(null, { status: 204, headers: corsHeaders });
