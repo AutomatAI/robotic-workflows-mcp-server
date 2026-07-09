@@ -931,13 +931,19 @@ const baseHandler = createMcpHandler(
         try {
           const body: Record<string, unknown> = {
             name: name ?? null,
-            recurrence_rule: recurrenceRule,
-            start_at: startAt,
-            input_resource_name: inputResourceName ?? null,
+            recurrenceRule,
+            startAt,
+            inputResourceName: inputResourceName ?? null,
           };
-          if (enabled !== undefined) body.status = enabled ? "active" : "paused";
           const r = await api("POST", `/api/agent/workflows/${workflowId}/schedules`, { body });
-          return result({ scheduleId: r.schedule?.id });
+          const scheduleId = r.schedule?.id;
+          // v1 create derives the initial status from workflow triggerability and
+          // ignores a client status, so honor enabled:false with a follow-up pause
+          // (ergonomics compose in the MCP, not the CRUD route).
+          if (scheduleId && enabled === false && r.schedule?.status !== "paused") {
+            await api("PATCH", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`, { body: { status: "paused" } });
+          }
+          return result({ scheduleId });
         } catch (e) {
           return fail(e);
         }
@@ -964,9 +970,9 @@ const baseHandler = createMcpHandler(
         try {
           const body: Record<string, unknown> = {};
           if (name !== undefined) body.name = name;
-          if (recurrenceRule !== undefined) body.recurrence_rule = recurrenceRule;
-          if (startAt !== undefined) body.start_at = startAt;
-          if (inputResourceName !== undefined) body.input_resource_name = inputResourceName;
+          if (recurrenceRule !== undefined) body.recurrenceRule = recurrenceRule;
+          if (startAt !== undefined) body.startAt = startAt;
+          if (inputResourceName !== undefined) body.inputResourceName = inputResourceName;
           if (enabled !== undefined) body.status = enabled ? "active" : "paused";
           const r = await api("PATCH", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`, { body });
           return result({ scheduleId: r.schedule?.id ?? scheduleId });
@@ -987,7 +993,7 @@ const baseHandler = createMcpHandler(
       async ({ workflowId, scheduleId }) => {
         try {
           const r = await api("DELETE", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`);
-          return result({ success: r.success === true, scheduleId });
+          return result({ success: r.deleted === true, scheduleId });
         } catch (e) {
           return fail(e);
         }
