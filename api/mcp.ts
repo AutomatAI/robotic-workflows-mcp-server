@@ -1092,8 +1092,12 @@ const baseHandler = createMcpHandler(
               const lg = await api("GET", `/api/agent/sessions/${sessionId}/logs`, { query: { cursor: logsCursor } });
               out.logs = { entries: lg.logs ?? [], nextCursor: lg.nextCursor ?? null };
             } catch {
+              // The studio has no queryable log store by design (the logs
+              // endpoint returns an honest 404, not a deployment gap). Per-node
+              // execution data lives in the timeline/io includes instead.
               out.logs = null;
-              out.logsNote = "Logs unavailable (the session logs endpoint is not deployed yet).";
+              out.logsNote =
+                "The studio does not retain queryable execution logs. Use include:['timeline','io'] for the per-node timeline and inputs/outputs.";
             }
           }
           return result(out);
