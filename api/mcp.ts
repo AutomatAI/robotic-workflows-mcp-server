@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { createHash } from "node:crypto";
+import { Redis } from "@upstash/redis";
 
 /**
  * Automat Robotic Workflows MCP Server.
@@ -42,38 +43,59 @@ const callerKey = new AsyncLocalStorage<string>();
 const callerProject = new AsyncLocalStorage<string>();
 const STUDIO_DEFAULT_PROJECT_ID = process.env.STUDIO_DEFAULT_PROJECT_ID || undefined;
 
-// set_project state: the agent-selected project, keyed by a hash of the caller's
-// token. BEST-EFFORT by design — this is warm-instance memory on a stateless
-// serverless function, so a cold start or a different instance forgets it. That
-// is self-healing: the next project-scoped call errors with "Missing project id"
-// and the agent re-runs set_project. Precedence: set_project > ?project_id=
+// set_project state: the agent-selected project, persisted in Upstash Redis
+// keyed by a hash of the caller's token. The server is a stateless, multi-
+// instance serverless function, so an in-process value can't survive across
+// requests — the shared store is what lets `set_project` stick between calls
+// and across cold starts. Precedence: set_project (this store) > ?project_id=
 // connection param / x-project-id header > STUDIO_DEFAULT_PROJECT_ID.
-const rememberedProject = new Map<string, { projectId: string; at: number }>();
-const REMEMBERED_PROJECT_TTL_MS = 6 * 60 * 60 * 1000;
-const REMEMBERED_PROJECT_MAX = 1000;
+//
+// Falls back to an in-process Map when Redis env is absent (local dev / tests /
+// a single stdio process) — there the Map genuinely persists for the process.
+const REMEMBERED_PROJECT_TTL_S = 6 * 60 * 60; // 6h
+const projectKey = (bucket: string) => `pat:project:${bucket}`;
+
+const redis =
+  process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN
+    ? new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN })
+    : null;
+const memFallback = new Map<string, { projectId: string; at: number }>();
 
 function tokenBucket(): string | null {
   const key = callerKey.getStore();
   return key ? createHash("sha256").update(key).digest("hex") : null;
 }
 
-function rememberedProjectId(): string | undefined {
+async function rememberedProjectId(): Promise<string | undefined> {
   const bucket = tokenBucket();
   if (!bucket) return undefined;
-  const entry = rememberedProject.get(bucket);
+  if (redis) {
+    // Best-effort read: a Redis blip must never break auth — treat as "no
+    // remembered project", which self-heals via a set_project re-run.
+    try {
+      return (await redis.get<string>(projectKey(bucket))) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const entry = memFallback.get(bucket);
   if (!entry) return undefined;
-  if (Date.now() - entry.at > REMEMBERED_PROJECT_TTL_MS) {
-    rememberedProject.delete(bucket);
+  if (Date.now() - entry.at > REMEMBERED_PROJECT_TTL_S * 1000) {
+    memFallback.delete(bucket);
     return undefined;
   }
   return entry.projectId;
 }
 
-function rememberProject(projectId: string): void {
+async function rememberProject(projectId: string): Promise<void> {
   const bucket = tokenBucket();
   if (!bucket) return;
-  if (rememberedProject.size >= REMEMBERED_PROJECT_MAX) rememberedProject.clear();
-  rememberedProject.set(bucket, { projectId, at: Date.now() });
+  if (redis) {
+    await redis.set(projectKey(bucket), projectId, { ex: REMEMBERED_PROJECT_TTL_S });
+    return;
+  }
+  if (memFallback.size >= 1000) memFallback.clear();
+  memFallback.set(bucket, { projectId, at: Date.now() });
 }
 
 const corsHeaders: Record<string, string> = {
@@ -135,7 +157,7 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
       // so it must not require one.
       resolvedPath = "/api/v1/projects";
     } else {
-      const projectId = rememberedProjectId() ?? callerProject.getStore();
+      const projectId = (await rememberedProjectId()) ?? callerProject.getStore();
       if (!projectId) {
         throw new ApiError(
           400,
@@ -519,7 +541,7 @@ const baseHandler = createMcpHandler(
               error: { code: "not_found", message: `Project ${projectId} is not accessible to this token — call list_projects to see the available projects.` },
             });
           }
-          rememberProject(projectId);
+          await rememberProject(projectId);
           return result({ projectId, validated: true });
         } catch (e) {
           return fail(e);
