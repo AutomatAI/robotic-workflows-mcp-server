@@ -60,8 +60,10 @@ Streamable HTTP, stateless. The Vercel default URL (`https://robotic-workflows-m
 
 | Var | Purpose |
 | --- | --- |
-| `STUDIO_API_BASE_URL` | Origin of the studio agent API. **Studio preview URLs change per deploy** — update this each studio redeploy (or point at a stable alias once preview protection is lifted). |
-| `VERCEL_AUTOMATION_BYPASS_SECRET` | Optional — only if the studio deployment is protected. |
+| `STUDIO_API_BASE_URL` | Origin of the studio API. **Production: `https://studio.runautomat.com`** (stable). For a studio *preview* deploy, use that preview's URL (it changes per deploy). No trailing slash needed. |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | **Leave UNSET for production** (the `studio.runautomat.com` custom domain is public). Set it only when `STUDIO_API_BASE_URL` points at a protection-enabled preview deploy. |
+
+**Auth note:** a PAT is scoped to the studio environment it was minted in. Use a token minted at `https://studio.runautomat.com/settings` for production — a preview/staging token will 401 against prod (different database).
 
 ## Connect a client
 
