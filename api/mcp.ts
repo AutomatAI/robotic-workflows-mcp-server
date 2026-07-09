@@ -1057,7 +1057,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Get run",
         description:
-          "Returns a run's status and result; add `include` for deeper data. include: 'timeline' (per-node status+timing), 'io' (per-node input/output), 'logs' (paginated; reconstructed from node timing), 'recording' (browser video URL when available). Omit include for a lightweight summary.",
+          "Returns a run's status and result; add `include` for deeper data. include: 'timeline' (per-node status+timing), 'io' (per-node input/output), 'logs' (currently always null — the studio retains no queryable log store; use timeline/io), 'recording' (browser video URL when available). Omit include for a lightweight summary.",
         inputSchema: {
           sessionId: z.string(),
           include: z.array(z.enum(["timeline", "io", "logs", "recording"])).optional(),
