@@ -358,7 +358,7 @@ const CODE_EXAMPLE =
 // write a code/decision node — the JSON Schema only describes structure.
 const DOCS = {
   overview:
-    "Automat workflows let an agent build, deploy, and schedule deterministic RPA that runs on its own with no LLM tokens. A workflow is a graph: exactly one `start`, one+ `end`, and `block`/`decision`/`document`/`hitl` nodes between, joined by edges. Build loop: get_docs (this) → get_workflow_schema (exact JSON shape) → create_workflow OR read_workflow(view:'graph') then edit_workflow(patch) → run_workflow → get_run.",
+    "Automat workflows let an agent build, deploy, and schedule deterministic RPA that runs on its own with no LLM tokens. A workflow is a graph: exactly one `start`, one+ `end`, and `block`/`decision`/`document`/`hitl` nodes between, joined by edges. Build loop: get_docs (this) → get_workflow_schema (exact JSON shape) → create_workflow OR read_workflow(view:'graph') then edit → run_workflow → get_run(include:['timeline','io']). Editing: edit_node_code for find/replace inside one node's code (preferred for code changes — send only the changed snippet), edit_workflow(patch) for structural changes (add/remove/rename nodes, rewire edges, settings; nodes.update replaces fields wholesale). Graph view shows per-node codeChars — read a big node with view:'node' before editing it.",
   codeNodes: {
     summary:
       "block mode:'code' is deterministic (no tokens). The `code` runs as the body of an async function — use await, TypeScript supported — and must `return` a value (becomes the node's output; the run's final output is the last node's return, surfaced under output.output).",
