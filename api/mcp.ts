@@ -272,7 +272,8 @@ function applyNodeOps(next: any, ops: any) {
   if (ops.remove?.length) {
     const removeSet = new Set(ops.remove);
     const unknown = ops.remove.filter((n: string) => !next.nodes.some((nd: any) => nd.name === n));
-    if (unknown.length) throw new Error(`Cannot remove unknown node(s): ${unknown.join(", ")}`);
+    if (unknown.length)
+      throw new Error(`Cannot remove unknown node(s): ${unknown.join(", ")}. Nodes: ${next.nodes.map((nd: any) => nd.name).join(", ")}`);
     next.nodes = next.nodes.filter((nd: any) => !removeSet.has(nd.name));
     next.edges = (next.edges ?? []).filter((e: any) => !removeSet.has(e.from) && !removeSet.has(e.to));
   }
@@ -287,7 +288,8 @@ function applyNodeOps(next: any, ops: any) {
   if (ops.update?.length) {
     for (const { name, patch: np } of ops.update) {
       const idx = next.nodes.findIndex((nd: any) => nd.name === name);
-      if (idx === -1) throw new Error(`Cannot update unknown node "${name}".`);
+      if (idx === -1)
+        throw new Error(`Cannot update unknown node "${name}". Nodes: ${next.nodes.map((nd: any) => nd.name).join(", ")}`);
       const merged = { ...next.nodes[idx], ...np };
       const newName = typeof np.name === "string" ? np.name : undefined;
       if (newName && newName !== name) {
@@ -347,7 +349,7 @@ const Lifecycle = z.enum(["development", "preview", "active"]);
 // descriptions so an agent can author nodes without a separate get_workflow_schema
 // call (which remains the full reference). Kept tight to respect the ~2KB budget.
 const CODE_MODEL =
-  "Node types: start, end, block, decision, document, hitl. A `block` is deterministic `code` (mode:'code', the default — no LLM tokens) or AI `execute` (mode:'execute' — costs tokens; prefer code). Block code runs async (await + TypeScript) and must `return` a value; in-scope globals: `page` & `context` (Playwright), `$('NodeName')` (a prior node's return), `secrets`, `helpers`, `projectResources`, `logger`. A `decision` has a boolean `expression` (same globals) and routes via edge `handle:'true'|'false'`. Browser recording: settings.browser={headless:false,recording:true}.";
+  "Node types: start, end, block, decision, document, hitl. A `block` is deterministic `code` (mode:'code', the default — no LLM tokens) or AI `execute` (mode:'execute' — costs tokens; prefer code). Block code runs async (await + TypeScript) and must `return` a value; in-scope globals: `page` & `context` (Playwright), `$('NodeName')` (a prior node's return), `secrets`, `helpers`, `projectResources`, `logger`. A `decision` routes by ordered boolean `branches:[{id,label?,expression}]` (same globals; first true wins) — one outgoing edge per branch with `handle:<branch id>` plus one `handle:'else'` edge for no-match. Browser recording: settings.browser={headless:false,recording:true}.";
 const CODE_EXAMPLE =
   "Example block — {type:'block',name:'Fetch',mode:'code',position:{x:160,y:0},code:\"await page.goto('https://example.com'); return { title: await page.title() };\"}";
 
@@ -362,11 +364,12 @@ const DOCS = {
       "block mode:'code' is deterministic (no tokens). The `code` runs as the body of an async function — use await, TypeScript supported — and must `return` a value (becomes the node's output; the run's final output is the last node's return, surfaced under output.output).",
     globals: {
       "$('NodeName')":
-        "Read another node's return value, e.g. $('Fetch').items. The only way to access prior output; check the node's input.availableNodeNames for valid names.",
+        "Read another node's return value, e.g. $('Fetch').items. The only way to access prior output; valid names are the node's upstream nodes (see read_workflow view:'graph').",
       fetch: "Standard fetch() for HTTP/API calls.",
       "page, context": "Playwright Page/BrowserContext — present only when settings.browser is set.",
       secrets: "Project secrets by name: secrets.MY_KEY (set via set_secrets; injected at runtime).",
-      "helpers, projectResources": "Workflow helper functions and named project resources.",
+      "helpers, projectResources":
+        "helpers.<name> are shared functions defined in the definition's top-level `helpers:[{name,description?,code}]` array (read them via read_workflow view:'full'; graph view lists their names). projectResources.<name> are named project data resources.",
       logger: "logger.info(msg) / logger.error(msg).",
       "emit, state": "emit(title,event,data) for events; state.sessions.previous / state.artifacts for cross-run state.",
     },
@@ -375,7 +378,8 @@ const DOCS = {
     start: "Entry point (exactly one).",
     end: "Exit point; passes through the previous node's output.",
     block: "Runs code (mode:'code') or an AI agent (mode:'execute' — costs tokens; prefer code). Fields: name, position, mode, code | (instructions + execute).",
-    decision: "Boolean `expression` (same scope as code). Route the two outgoing edges with handle 'true' / 'false'.",
+    decision:
+      "Ordered `branches:[{id, label?, expression}]` — each expression is a JS boolean (same scope as code); the first true branch wins. Route one outgoing edge per branch with handle=<branch id>, plus exactly one catch-all edge with handle:'else' (label it via the node's `elseLabel`). Branch ids are stable routing keys — never 'else', never renamed when the label changes. (Legacy binary form — a single `expression` with edges handle:'true'/'false' — still runs but is deprecated; author `branches`.)",
     document: "Extract data from files via an extractor (extractorId + fileInputs). Find ids with list_extractors.",
     hitl: "Pause for a human: prompt + actions:[{id,label}]. Outgoing edges route by action id or 'timeout'.",
   },
@@ -390,6 +394,11 @@ const DOCS = {
     { title: "Chain nodes with $()", code: "const ids = $('Fetch').topIds;\nreturn { count: ids.length };" },
     { title: "Browser code block", code: "await page.goto('https://example.com');\nreturn { title: await page.title() };" },
     { title: "Use a secret", code: "const res = await fetch('https://api.example.com', { headers: { Authorization: 'Bearer ' + secrets.API_TOKEN } });\nreturn await res.json();" },
+    {
+      title: "Decision node (multiway) + edges",
+      code:
+        "// node\n{ type:'decision', name:'Has Rows', position:{x:400,y:0},\n  branches:[{ id:'has-rows', label:'Rows found', expression: \"$('Detect Rows').count > 0\" }],\n  elseLabel:'No rows' }\n// edges — one per branch id, plus the required 'else' catch-all\n[{ from:'Has Rows', to:'Process Rows', handle:'has-rows' },\n { from:'Has Rows', to:'End', handle:'else' }]",
+    },
   ],
 };
 const DOCS_TOPICS = ["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "examples"] as const;
@@ -683,7 +692,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Read workflow",
         description:
-          "Reads a workflow's active definition. ALWAYS read before editing. view: 'graph' (nodes/edges + metadata, no node code), 'node' (one node, needs nodeName), 'full' (entire definition). TIERS: 'full' and 'node' return definition JSON and require an authorship-tier PAT (author role + write token) — expect a 403 'forbidden' otherwise; 'graph' works with any token (degrading to node names/types + edges without authorship). Returns the view plus _meta — pass _meta.versionId as expectedActiveVersionId to edit_workflow.",
+          "Reads a workflow's active definition. ALWAYS read before editing. view: 'graph' (nodes/edges + metadata — no code bodies, but per-node codeChars, decision branches/elseLabel, and a helpers index so you know what to fetch), 'node' (one node incl. its code, needs nodeName), 'full' (entire definition incl. helpers' code). TIERS: 'full' and 'node' return definition JSON and require an authorship-tier PAT (author role + write token) — expect a 403 'forbidden' otherwise; 'graph' works with any token (degrading to node names/types + edges without authorship). Returns the view plus _meta — pass _meta.versionId as expectedActiveVersionId to edit_workflow/edit_node_code.",
         inputSchema: {
           workflowId: z.string(),
           view: z.enum(["graph", "node", "full"]),
@@ -728,19 +737,28 @@ const baseHandler = createMcpHandler(
           const def = w.definition ?? null;
           if (!def) return result({ _meta: meta, definition: null, note: "Workflow has no active version yet." });
           if (view === "full") return result({ _meta: meta, definition: def });
-          // graph (rich): strip per-node code/execute, keep routing-critical fields
+          // graph (rich): strip per-node code bodies, keep routing-critical fields.
+          // codeChars tells the agent how big a node's code is before fetching it
+          // with view:'node'; branches/elseLabel are the decision routing logic.
           const nodes = (def.nodes ?? []).map((n: any) => ({
             name: n.name, type: n.type, position: n.position,
             ...(n.mode ? { mode: n.mode } : {}),
+            ...(typeof n.code === "string" ? { codeChars: n.code.length } : {}),
             ...(n.expression ? { expression: n.expression } : {}),
+            ...(n.branches ? { branches: n.branches } : {}),
+            ...(n.elseLabel ? { elseLabel: n.elseLabel } : {}),
             ...(n.extractorId ? { extractorId: n.extractorId } : {}),
             ...(n.instructions ? { instructions: n.instructions } : {}),
+          }));
+          const helpers = (def.helpers ?? []).map((h: any) => ({
+            name: h.name, description: h.description ?? null, codeChars: (h.code ?? "").length,
           }));
           return result({
             _meta: meta,
             name: def.name, description: def.description, settings: def.settings,
             inputSchema: def.inputSchema, outputSchema: def.outputSchema,
             nodes, edges: def.edges ?? [],
+            ...(helpers.length ? { helpers } : {}),
           });
         } catch (e) {
           return fail(e);
@@ -806,7 +824,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Edit workflow",
         description:
-          "Applies a composite patch to a workflow's graph and saves a new version. Read the graph first, then send only what changes in `patch`. Validated server-side; on success a new version, on failure an error. Pass expectedActiveVersionId (from read_workflow's _meta) to avoid clobbering concurrent edits. Returns: { ok, versionId, versionNumber, deduped } or { error }.",
+          "Applies a composite patch to a workflow's graph and saves a new version. Read the graph first, then send only what changes in `patch`. Best for STRUCTURAL edits (add/remove/rename nodes, rewire edges, settings) — to change part of an existing node's code, prefer edit_node_code (find/replace; no need to resend the whole code string; a nodes.update patch REPLACES each field wholesale). Validated server-side; on success a new version, on failure an error. Pass expectedActiveVersionId (from read_workflow's _meta) to avoid clobbering concurrent edits. Returns: { ok, versionId, versionNumber, deduped } or { error }.",
         inputSchema: {
           workflowId: z.string(),
           patch: WorkflowPatchInput,
@@ -831,6 +849,94 @@ const baseHandler = createMcpHandler(
             body: { definition: next, name: next.name, expectedActiveVersionId: expectedActiveVersionId ?? w.activeVersionId },
           });
           return result({ ok: true, versionId: r.version?.id, versionNumber: r.version?.versionNumber, deduped: r.version?.deduped ?? false });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "edit_node_code",
+      {
+        title: "Edit node code (find/replace)",
+        description:
+          "Surgically edits ONE node's code (or instructions / a decision branch expression) by exact string replacement — like a text editor's find & replace. PREFER THIS over edit_workflow when changing part of an existing code block: you send only the changed snippet instead of resending the whole (possibly huge) code string. oldString must match the current text exactly (whitespace included) and occur exactly once, or pass replaceAll. To rewrite a field wholesale or restructure the graph, use edit_workflow. Saves a new version. Returns: { ok, versionId, versionNumber, replacements, fieldChars } or { error }.",
+        inputSchema: {
+          workflowId: z.string(),
+          nodeName: z.string().describe("Exact node name (see read_workflow view:'graph')."),
+          oldString: z.string().min(1).describe("Exact text to find in the node's field. Include enough surrounding context to be unique."),
+          newString: z.string().describe("Replacement text (may be empty to delete)."),
+          field: z
+            .enum(["code", "instructions", "expression"])
+            .describe("Which node field to edit. Default 'code'. 'expression' searches the legacy expression AND all decision branch expressions.")
+            .optional(),
+          replaceAll: z.boolean().describe("Replace every occurrence instead of requiring a unique match.").optional(),
+          expectedActiveVersionId: z.string().describe("From read_workflow's _meta.versionId.").optional(),
+        },
+        annotations: CREATE,
+      },
+      async ({ workflowId, nodeName, oldString, newString, field, replaceAll, expectedActiveVersionId }) => {
+        try {
+          if (oldString === newString)
+            return result({ error: { code: "bad_request", message: "oldString and newString are identical — nothing to change." } });
+          const cur = await api("GET", `/api/agent/workflows/${workflowId}`);
+          const w = cur.workflow;
+          if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
+          const current = w.definition;
+          if (!current) return result({ error: { code: "bad_request", message: "Workflow has no version to edit. Create one first." } });
+          const next = JSON.parse(JSON.stringify(current));
+          const node = (next.nodes ?? []).find((n: any) => n.name === nodeName);
+          if (!node) {
+            const known = (next.nodes ?? []).map((n: any) => n.name).join(", ");
+            return result({ error: { code: "not_found", message: `No node named "${nodeName}". Nodes: ${known}` } });
+          }
+          const f = field ?? "code";
+          // Each target is one string-valued slot the search runs over. 'expression'
+          // spans the legacy node.expression plus every branch expression, so a
+          // canonical decision node is editable without knowing which shape it uses.
+          const targets: { where: string; get: () => unknown; set: (v: string) => void }[] = [];
+          if (f === "code") targets.push({ where: "code", get: () => node.code, set: (v) => (node.code = v) });
+          if (f === "instructions") targets.push({ where: "instructions", get: () => node.instructions, set: (v) => (node.instructions = v) });
+          if (f === "expression") {
+            targets.push({ where: "expression", get: () => node.expression, set: (v) => (node.expression = v) });
+            (node.branches ?? []).forEach((b: any, i: number) =>
+              targets.push({ where: `branches[${i}].expression`, get: () => b.expression, set: (v) => (b.expression = v) }),
+            );
+          }
+          const present = targets.filter((t) => typeof t.get() === "string");
+          if (!present.length)
+            return result({ error: { code: "bad_request", message: `Node "${nodeName}" (type ${node.type}) has no ${f} to edit.` } });
+          const counts = present.map((t) => (t.get() as string).split(oldString).length - 1);
+          const total = counts.reduce((a, b) => a + b, 0);
+          if (total === 0)
+            return result({
+              error: {
+                code: "not_found",
+                message: `oldString not found in ${f} of node "${nodeName}" (${present.map((t) => `${t.where}: ${(t.get() as string).length} chars`).join(", ")}). Read the current text with read_workflow view:'node' and match it exactly, including whitespace.`,
+              },
+            });
+          if (total > 1 && !replaceAll)
+            return result({
+              error: {
+                code: "conflict",
+                message: `oldString occurs ${total} times in ${f} of node "${nodeName}". Add surrounding context to make it unique, or pass replaceAll:true.`,
+              },
+            });
+          present.forEach((t, i) => {
+            if (counts[i] > 0) t.set((t.get() as string).split(oldString).join(newString));
+          });
+          const r = await api("PUT", `/api/agent/workflows/${workflowId}`, {
+            body: { definition: next, name: next.name, expectedActiveVersionId: expectedActiveVersionId ?? w.activeVersionId },
+          });
+          const fieldChars = present.reduce((a, t) => a + (t.get() as string).length, 0);
+          return result({
+            ok: true,
+            versionId: r.version?.id,
+            versionNumber: r.version?.versionNumber,
+            deduped: r.version?.deduped ?? false,
+            replacements: total,
+            fieldChars,
+          });
         } catch (e) {
           return fail(e);
         }
@@ -1103,7 +1209,13 @@ const baseHandler = createMcpHandler(
             if (inc.has("timeline"))
               out.timeline = nodes.map((nd: any) => ({ name: nd.name, type: nd.type, status: nd.status, startedAt: nd.startedAt, endedAt: nd.endedAt, durationMs: durMs(nd.startedAt, nd.endedAt) }));
             if (inc.has("io"))
-              out.nodeIO = nodes.map((nd: any) => ({ name: nd.name, input: nd.inputData ?? null, output: nd.outputData ?? null }));
+              // Drop availableNodeNames from each node's input echo: it repeats the
+              // upstream-name list per node (quadratic noise) and the graph already
+              // answers "which names can $() see".
+              out.nodeIO = nodes.map((nd: any) => {
+                const { availableNodeNames: _drop, ...input } = (nd.inputData ?? {}) as Record<string, unknown>;
+                return { name: nd.name, input: Object.keys(input).length ? input : null, output: nd.outputData ?? null };
+              });
           }
           if (inc.has("recording")) out.recordingUrl = s.recordingUrl ?? null;
           if (inc.has("logs")) {
@@ -1381,7 +1493,7 @@ const baseHandler = createMcpHandler(
     serverInfo: { name: "automat-robotic-workflows", version: "0.4.0" },
     instructions:
       "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: list_projects to discover ids, then set_project (re-call it if a tool errors with 'Missing project id') — or pin one on the connection via ?project_id=<uuid> / x-project-id / STUDIO_DEFAULT_PROJECT_ID. Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
-      "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit_workflow with a small patch (validates and saves a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
+      "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit: edit_node_code for surgical find/replace inside one node's code (preferred for code changes — no resending big strings), edit_workflow with a small patch for structural changes (both validate and save a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
       "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",
   },
   { basePath: "/api", maxDuration: 60, verboseLogs: true },
