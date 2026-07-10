@@ -1131,21 +1131,32 @@ const baseHandler = createMcpHandler(
       {
         title: "Run workflow",
         description:
-          "Triggers a run of the workflow's active version on the stable production runtime (the default for all automations). `input` is validated against the workflow's input schema. Returns: { sessionId, status: 'queued' } — poll get_run.",
+          "Triggers a run of the workflow's active version. Defaults to the stable PRODUCTION runtime — omit previewBranch for normal runs. `input` is validated against the workflow's input schema. Returns: { sessionId, status: 'queued' } — poll get_run.",
         inputSchema: {
           workflowId: z.string(),
           input: z.record(z.string(), z.unknown()).optional(),
+          previewBranch: z
+            .string()
+            .describe(
+              "ADVANCED — leave unset for normal production runs. Set ONLY to run against a specific deployed preview-branch runtime (e.g. testing an unreleased runtime on branch 'pr-123'). The branch MUST have a running preview worker or the run stays stuck in 'queued'."
+            )
+            .optional(),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ workflowId, input }) => {
+      async ({ workflowId, input, previewBranch }) => {
         try {
-          // No environment/branch sent: studio resolves the default Trigger
-          // deploy tier for its deployment (production on a prod studio). The
-          // preview tier is deliberately NOT agent-selectable — a preview run
-          // needs a pinned preview-branch worker, which otherwise leaves the
-          // run stuck in `queued`.
-          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { body: { input: input ?? {} } });
+          // Default: no environment/branch → studio resolves its deployment's
+          // default Trigger tier (production on a prod studio). Preview is an
+          // explicit opt-in: only when the caller names a previewBranch do we
+          // send environment='preview' + that branch. A preview run needs a
+          // deployed worker for the branch, else it sits in 'queued'.
+          const body: Record<string, unknown> = { input: input ?? {} };
+          if (previewBranch) {
+            body.environment = "preview";
+            body.branch = previewBranch;
+          }
+          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { body });
           return result({ sessionId: r.sessionId, status: r.status ?? "queued" });
         } catch (e) {
           return fail(e);

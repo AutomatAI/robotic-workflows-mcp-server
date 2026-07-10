@@ -233,9 +233,10 @@ All schedules run in **UTC**. A workflow may have many; run input comes from a l
 ## Runs
 
 ### `run_workflow`
-- Input: `{ workflowId, input? }`
+- Input: `{ workflowId, input?, previewBranch? }`
 - Output: `{ sessionId, status: 'queued' }` · `input` validated against `inputSchema`; `lifecycle_gated` if disabled / no active version. → `POST /api/agent/workflows/{id}/run`
-- **Runs on the stable production Trigger runtime** — studio resolves the default deploy tier for its deployment (production on a prod studio). The `environment`/`branch` inputs were removed: agents shouldn't pick a Trigger tier, and the preview tier in particular needs a pinned preview-branch worker, so a preview run just stalls in `queued`.
+- **Defaults to the stable production Trigger runtime** — studio resolves its deployment's default deploy tier (production on a prod studio). This is the path for all normal runs.
+- **`previewBranch` is an explicit opt-in** — set it ONLY to run against a specific deployed preview-branch runtime (sends `environment=preview` + that branch). The branch must have a running preview worker or the run stalls in `queued`; that's why it's off by default and never inferred.
 
 ### `list_runs`
 - Input: `{ workflowId?, status?, limit?, cursor? }` · Output: `{ items: [{ sessionId, workflowId, status, source, startedAt, endedAt, durationMs }], nextCursor }` → `GET /api/agent/sessions`
