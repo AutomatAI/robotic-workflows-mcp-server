@@ -32,7 +32,7 @@ Live, and "done" is verifiable by the model with no human in the loop:
 
 - **Responding URL** — `https://workflows.runautomat.com/api/mcp` answers `tools/list` and `tools/call` over Streamable HTTP.
 - **Connect any MCP client** with a project key (see [Connect a client](#connect-a-client)) and run the loop: `get_docs` → `create_workflow` → `run_workflow` → `get_run`.
-- **Acceptance checklist (rubric).** (1) endpoint lists **34 tools**; (2) `create_workflow` + `edit_workflow(patch)` each save a new version; (3) `run_workflow` → `get_run` returns `status:"completed"` with structured `output`; (4) a browser workflow returns a `recordingUrl`.
+- **Acceptance checklist (rubric).** (1) endpoint lists **35 tools**; (2) `create_workflow` + `edit_workflow(patch)` each save a new version; (3) `run_workflow` → `get_run` returns `status:"completed"` with structured `output`; (4) a browser workflow returns a `recordingUrl`.
 
 ## How Claude built it (Opus 4.8)
 
@@ -108,7 +108,7 @@ vercel --prod        # deploy (requires vercel login)
 
 # Tools
 
-Live reference for the 34 tools. Each forwards to the studio **public v1 API** (`STUDIO_API_BASE_URL` + `/api/v1/projects/{projectId}/*`), passing the caller's PAT; the project comes from the connection (`project_id`). The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
+Live reference for the 35 tools. Each forwards to the studio **public v1 API** (`STUDIO_API_BASE_URL` + `/api/v1/projects/{projectId}/*`), passing the caller's PAT; the project comes from the connection (`project_id`). The build/edit flow mirrors studio's own builder agent: `read_workflow` → `edit_workflow(patch)` with server-side validation.
 
 ## Conventions
 
@@ -168,7 +168,7 @@ Authoring guide — **call first**. How to write `code`/`decision` nodes: global
 
 ### `read_workflow`
 - Input: `{ workflowId, view: 'graph' | 'node' | 'full', nodeName? }` (`nodeName` required for `node`)
-- Output: `{ _meta: { workflowId, versionId, versionNumber, status, apiEnabled, apiUrlSlug }, ... }` — `graph` (nodes/edges + metadata, no node code), `node` (one node), `full` (entire definition). Pass `_meta.versionId` to `edit_workflow`.
+- Output: `{ _meta: { workflowId, versionId, versionNumber, status, apiEnabled, apiUrlSlug }, ... }` — `graph` (nodes/edges + metadata — no code bodies, but per-node `codeChars`, decision `branches`/`elseLabel`, and a `helpers` index `[{name, description, codeChars}]`), `node` (one node incl. code), `full` (entire definition incl. helper code). Pass `_meta.versionId` to `edit_workflow`/`edit_node_code`.
 - Tiers: `full`/`node` return definition JSON → authorship-tier PAT required (403 `forbidden` otherwise); `graph` works with any token, degrading to the server's lean names/types+edges view without authorship.
 - → `GET /api/agent/workflows/{id}?view=…`; the rich `graph` projection derives from `view=full`, falling back to the server's `view=graph` on a tier 403.
 
@@ -193,6 +193,12 @@ Authoring guide — **call first**. How to write `code`/`decision` nodes: global
   ```
 - Output: `{ ok: true, versionId, versionNumber, deduped }` or `{ error: { code, message, issues? } }`
 - Client reads the active definition, applies the patch (order: `nodes.remove` → `nodes.add` → `nodes.update` [rename rewrites edges] → `edges.remove` → `edges.add` → top-level), then PUTs the full definition. The server validates → a new version (one edit, one version). `expectedActiveVersionId` (from `read_workflow`'s `_meta`) gives optimistic concurrency. → `GET` + `PUT /api/agent/workflows/{id}`
+- Best for structural edits; `nodes.update` replaces each patched field wholesale — for partial code changes use `edit_node_code`.
+
+### `edit_node_code`
+- Input: `{ workflowId, nodeName, oldString, newString, field?: 'code' | 'instructions' | 'expression', replaceAll?, expectedActiveVersionId? }`
+- Output: `{ ok: true, versionId, versionNumber, deduped, replacements, fieldChars }` or `{ error: { code, message } }`
+- Surgical find/replace inside one node — the agent sends only the changed snippet instead of resending a multi-KB `code` string. `oldString` must match exactly and occur once (or pass `replaceAll`); an ambiguous match returns the occurrence count, a miss returns the field sizes. `field: 'expression'` spans the legacy `expression` plus every decision `branches[i].expression`. Same read-modify-PUT + optimistic-concurrency path as `edit_workflow`. → `GET` + `PUT /api/agent/workflows/{id}`
 
 ## Versions
 

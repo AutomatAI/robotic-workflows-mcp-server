@@ -9,7 +9,7 @@
 
 | # | Criterion | How to verify |
 | --- | --- | --- |
-| 1 | **Reachable & complete** | `tools/list` returns **34 tools** (incl. `get_docs`, `get_workflow_schema`, `create_workflow`, `edit_workflow`, `run_workflow`, `get_run`). |
+| 1 | **Reachable & complete** | `tools/list` returns **35 tools** (incl. `get_docs`, `get_workflow_schema`, `create_workflow`, `edit_workflow`, `run_workflow`, `get_run`). |
 | 2 | **Self-documenting** | `get_docs` returns the code-node authoring model — globals incl. `$('NodeName')`, `fetch`, and worked examples. |
 | 3 | **Build** | `create_workflow` → `{ workflowId, versionId }`; `read_workflow(view:'graph')` returns the graph + `_meta`. |
 | 4 | **Edit (patch model)** | `edit_workflow` with a composite patch → `{ ok:true, versionId }` (new version). An invalid patch → `{ error:{ code:'validation_failed', issues } }`. |
