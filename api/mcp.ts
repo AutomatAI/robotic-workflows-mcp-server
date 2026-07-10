@@ -28,9 +28,6 @@ import { Redis } from "@upstash/redis";
 // Protected previews also need VERCEL_AUTOMATION_BYPASS_SECRET.
 const STUDIO_API_BASE_URL = (process.env.STUDIO_API_BASE_URL ?? "").replace(/\/$/, "");
 const VERCEL_BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
-// Optional: pin runs to a Trigger preview branch (hackathon: pr-123). When set,
-// run_workflow defaults environment→'preview' and branch→this value.
-const STUDIO_RUN_BRANCH = process.env.STUDIO_RUN_BRANCH || undefined;
 
 // Pass-through auth: the caller supplies their Studio personal access token
 // (pat_…) as the connector api key; we forward it per-request as a Bearer to the
@@ -344,7 +341,7 @@ function applyWorkflowPatch(current: any, patch: any): any {
 // Shared input schema pieces
 const WorkflowStatus = z.enum(["development", "preview", "active", "disabled"]);
 const RunStatus = z.enum(["pending", "queued", "executing", "paused", "completed", "failed", "canceled"]);
-const Environment = z.enum(["development", "staging", "preview", "production"]);
+const Environment = z.enum(["development", "staging", "production"]);
 const Lifecycle = z.enum(["development", "preview", "active"]);
 // Shared, concise execution model — folded into the definition/patch param
 // descriptions so an agent can author nodes without a separate get_workflow_schema
@@ -1028,20 +1025,21 @@ const baseHandler = createMcpHandler(
       {
         title: "Run workflow",
         description:
-          "Triggers a run of the workflow's active version. `input` is validated against the workflow's input schema. `environment` selects the run tier; for preview runs, `branch` pins the deployed preview-branch runtime. Both default to the server's configured values. Returns: { sessionId, status: 'queued' } — poll get_run.",
+          "Triggers a run of the workflow's active version on the stable production runtime (the default for all automations). `input` is validated against the workflow's input schema. Returns: { sessionId, status: 'queued' } — poll get_run.",
         inputSchema: {
           workflowId: z.string(),
           input: z.record(z.string(), z.unknown()).optional(),
-          environment: Environment.describe("Run environment; defaults to the server config.").optional(),
-          branch: z.string().describe("Preview branch to pin (preview environment only); defaults to the server config.").optional(),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ workflowId, input, environment, branch }) => {
+      async ({ workflowId, input }) => {
         try {
-          const env = environment ?? (STUDIO_RUN_BRANCH ? "preview" : undefined);
-          const br = branch ?? (env === "preview" ? STUDIO_RUN_BRANCH : undefined);
-          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { body: { input: input ?? {}, environment: env, branch: br } });
+          // No environment/branch sent: studio resolves the default Trigger
+          // deploy tier for its deployment (production on a prod studio). The
+          // preview tier is deliberately NOT agent-selectable — a preview run
+          // needs a pinned preview-branch worker, which otherwise leaves the
+          // run stuck in `queued`.
+          const r = await api("POST", `/api/agent/workflows/${workflowId}/run`, { body: { input: input ?? {} } });
           return result({ sessionId: r.sessionId, status: r.status ?? "queued" });
         } catch (e) {
           return fail(e);
