@@ -1,8 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createMcpHandler } from "mcp-handler";
-import { z } from "zod";
 import { createHash } from "node:crypto";
 import { Redis } from "@upstash/redis";
+import { createMcpHandler } from "mcp-handler";
+import { z } from "zod";
+import packageJson from "../package.json" with { type: "json" };
 
 /**
  * Automat Robotic Workflows MCP Server.
@@ -99,7 +100,7 @@ const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers":
-    "content-type, authorization, x-api-key, mcp-session-id, mcp-protocol-version",
+    "content-type, authorization, x-api-key, x-project-id, mcp-session-id, mcp-protocol-version",
   "Access-Control-Expose-Headers": "mcp-session-id",
 };
 
@@ -162,7 +163,7 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
           "Missing project id — call the set_project tool with the project UUID (preferred), or add ?project_id=<uuid> to the MCP URL / an x-project-id header / STUDIO_DEFAULT_PROJECT_ID."
         );
       }
-      resolvedPath = `/api/v1/projects/${projectId}/` + path.slice("/api/agent/".length);
+      resolvedPath = `/api/v1/projects/${projectId}/${path.slice("/api/agent/".length)}`;
     }
   }
   const url = new URL(STUDIO_API_BASE_URL + resolvedPath);
@@ -190,7 +191,7 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
         : undefined,
   });
   const text = await res.text();
-  let data: any = undefined;
+  let data: any ;
   if (text) {
     try {
       data = JSON.parse(text);
@@ -199,9 +200,9 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
     }
   }
   if (!res.ok) {
-    const apiCode = (data && data.error) || `http_${res.status}`;
-    const message = (data && (data.message || data.error)) || text || res.statusText;
-    throw new ApiError(res.status, String(apiCode), String(message), data && data.issues);
+    const apiCode = data?.error || `http_${res.status}`;
+    const message = data?.message || data?.error || text || res.statusText;
+    throw new ApiError(res.status, String(apiCode), String(message), data?.issues);
   }
   return data;
 }
@@ -325,7 +326,13 @@ function applyEdgeOps(next: any, ops: any) {
   }
 }
 
-function applyWorkflowPatch(current: any, patch: any): any {
+/**
+ * Applies the MCP composite workflow patch without mutating the current definition.
+ *
+ * This export is a test seam for the existing read-modify-write behavior; the
+ * endpoint remains the owner of the patch implementation.
+ */
+export function applyWorkflowPatch(current: any, patch: any): any {
   const next = JSON.parse(JSON.stringify(current ?? {}));
   if (!Array.isArray(next.nodes)) next.nodes = [];
   if (!Array.isArray(next.edges)) next.edges = [];
@@ -343,7 +350,6 @@ function applyWorkflowPatch(current: any, patch: any): any {
 // Shared input schema pieces
 const WorkflowStatus = z.enum(["development", "preview", "active", "disabled"]);
 const RunStatus = z.enum(["pending", "queued", "executing", "paused", "completed", "failed", "canceled"]);
-const Environment = z.enum(["development", "staging", "production"]);
 const Lifecycle = z.enum(["development", "preview", "active"]);
 // Shared, concise execution model — folded into the definition/patch param
 // descriptions so an agent can author nodes without a separate get_workflow_schema
@@ -388,7 +394,20 @@ const DOCS = {
   secrets:
     "Store with set_secrets({secrets:[{key,value}]}); read at runtime as secrets.KEY inside a code block. list_secrets never returns values.",
   schedules:
-    "create_schedule with an RFC 5545 recurrenceRule (e.g. 'FREQ=DAILY;BYHOUR=9'), evaluated in UTC. Run input comes from a linked project resource (inputResourceName).",
+    "create_schedule with an RFC 5545 recurrenceRule (e.g. 'FREQ=DAILY;BYHOUR=9'), evaluated in UTC. Run input comes from a linked project resource (inputResourceName). Only create/enable schedules after the workflow is `active` and the user has signed off.",
+  lifecycle: {
+    policy:
+      "Agents MUST follow this rollout ladder. Never skip steps or promote to `active` without explicit user approval.",
+    development:
+      "DEFAULT for all new/changed workflows. Keep status `development` while iterating. If a workflow explicitly implements a `dryRun` input, prefer `{ dryRun: true }`; this is a workflow convention, not a platform-enforced side-effect sandbox, so inspect the workflow before relying on it. Manual runs only — do not treat development workflows as production-ready.",
+    preview:
+      "Promote with update_workflow(status:'preview') ONLY when ready for the HUMAN to test end-to-end (real emails/side effects if appropriate). Tell the user the workflow is in preview and ready for their review.",
+    active:
+      "Promote with update_workflow(status:'active') ONLY after the user explicitly confirms go-live. Required before production schedules and unattended cron. Never activate on your own.",
+    disabled: "Pause production; disabling auto-pauses schedules.",
+    testingTips:
+      "development + a workflow-defined dryRun:true convention → lower-risk agent iteration after inspecting the implementation (inspect get_run include:['io']). preview → user validation run. active → production.",
+  },
   examples: [
     { title: "HTTP fetch → return", code: "const r = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');\nreturn { topIds: (await r.json()).slice(0, 5) };" },
     { title: "Chain nodes with $()", code: "const ids = $('Fetch').topIds;\nreturn { count: ids.length };" },
@@ -401,7 +420,7 @@ const DOCS = {
     },
   ],
 };
-const DOCS_TOPICS = ["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "examples"] as const;
+const DOCS_TOPICS = ["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "lifecycle", "examples"] as const;
 
 const DefinitionInput = z
   .record(z.string(), z.unknown())
@@ -578,7 +597,7 @@ const baseHandler = createMcpHandler(
           "How to author Automat workflows: code-node globals ($('NodeName'), fetch, secrets), async/return semantics, node types, browser/recording, schedules, and worked examples. CALL THIS FIRST when building or editing a workflow. Pass `topic` to return just one section.",
         inputSchema: {
           topic: z
-            .enum(["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "examples"])
+            .enum(["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "lifecycle", "examples"])
             .describe("Optional: return only this section.")
             .optional(),
         },
@@ -638,7 +657,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Create workflow",
         description:
-          "Creates a new workflow and its first version. Omit `definition` for a minimal start → end scaffold. Returns: { workflowId, versionId, versionNumber, status }.",
+          "Creates a new workflow and its first version (status defaults to development — keep it there while iterating). Omit `definition` for a minimal start → end scaffold. Returns: { workflowId, versionId, versionNumber, status }. See get_docs topic:'lifecycle' for the development → preview → active rollout policy.",
         inputSchema: {
           name: z.string(),
           description: z.string().optional(),
@@ -771,7 +790,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Update workflow settings",
         description:
-          "Updates a workflow's name, description, lifecycle status, and API-trigger config — not its graph (use edit_workflow). status: development | preview | active | disabled (activating needs a published version; disabling auto-pauses schedules). Returns the updated workflow.",
+          "Updates a workflow's name, description, lifecycle status, and API-trigger config — not its graph (use edit_workflow). status: development | preview | active | disabled (activating needs a published version; disabling auto-pauses schedules). AGENT POLICY: keep development while testing; move to preview only when the human should validate; move to active ONLY after explicit user go-live approval. Returns the updated workflow.",
         inputSchema: {
           workflowId: z.string(),
           name: z.string().optional(),
@@ -899,9 +918,9 @@ const baseHandler = createMcpHandler(
           if (f === "instructions") targets.push({ where: "instructions", get: () => node.instructions, set: (v) => (node.instructions = v) });
           if (f === "expression") {
             targets.push({ where: "expression", get: () => node.expression, set: (v) => (node.expression = v) });
-            (node.branches ?? []).forEach((b: any, i: number) =>
-              targets.push({ where: `branches[${i}].expression`, get: () => b.expression, set: (v) => (b.expression = v) }),
-            );
+            (node.branches ?? []).forEach((b: any, i: number) => {
+              targets.push({ where: `branches[${i}].expression`, get: () => b.expression, set: (v) => (b.expression = v) });
+            });
           }
           const present = targets.filter((t) => typeof t.get() === "string");
           if (!present.length)
@@ -1131,7 +1150,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Run workflow",
         description:
-          "Triggers a run of the workflow's active version. Defaults to the stable PRODUCTION runtime — omit previewBranch for normal runs. `input` is validated against the workflow's input schema. Returns: { sessionId, status: 'queued' } — poll get_run.",
+          "Triggers a run of the workflow's active version. Defaults to the stable PRODUCTION runtime — omit previewBranch for normal runs. `input` is validated against the workflow's input schema. Some workflows implement a `dryRun` input convention, but the platform does not make arbitrary runs side-effect-free. Returns: { sessionId, status: 'queued' } — poll get_run.",
         inputSchema: {
           workflowId: z.string(),
           input: z.record(z.string(), z.unknown()).optional(),
@@ -1501,10 +1520,11 @@ const baseHandler = createMcpHandler(
     );
   },
   {
-    serverInfo: { name: "automat-robotic-workflows", version: "0.4.0" },
+    serverInfo: { name: "automat-robotic-workflows", version: packageJson.version },
     instructions:
       "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: list_projects to discover ids, then set_project (re-call it if a tool errors with 'Missing project id') — or pin one on the connection via ?project_id=<uuid> / x-project-id / STUDIO_DEFAULT_PROJECT_ID. Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
       "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit: edit_node_code for surgical find/replace inside one node's code (preferred for code changes — no resending big strings), edit_workflow with a small patch for structural changes (both validate and save a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
+      "Lifecycle policy (REQUIRED): development while the agent iterates (default for new workflows; use dryRun:true only when the workflow explicitly implements that convention, because the platform does not suppress arbitrary side effects) → preview ONLY when ready for the human to test → active ONLY after explicit user go-live approval. Never skip to active on your own. get_docs topic:'lifecycle' has the full ladder.\n\n" +
       "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",
   },
   { basePath: "/api", maxDuration: 60, verboseLogs: true },
@@ -1522,9 +1542,13 @@ const authed = async (req: Request): Promise<Response> => {
     });
   }
   const projectId = extractProjectId(req);
-  return callerKey.run(key, () =>
+  const response = await callerKey.run(key, () =>
     projectId ? callerProject.run(projectId, () => baseHandler(req)) : baseHandler(req)
   );
+  for (const [name, value] of Object.entries(corsHeaders)) {
+    response.headers.set(name, value);
+  }
+  return response;
 };
 
 const handleOptions = (): Response => new Response(null, { status: 204, headers: corsHeaders });

@@ -1,0 +1,1 @@
+../../.cursor/rules/mcp-contract.md
