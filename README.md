@@ -1,41 +1,21 @@
 # Robotic Workflows MCP Server
 
-**Claude Build Day submission.** A remote [MCP](https://modelcontextprotocol.io/) server that lets a Claude agent **build, deploy, run, and debug real RPA workflows** on [Automat](https://runautomat.com/) — browser/API automations that then run on their own schedule, deterministically, **with zero LLM tokens per run.**
+A remote [MCP](https://modelcontextprotocol.io/) server that lets an AI agent **build, deploy, run, and debug RPA workflows** on [Automat](https://runautomat.com/) — browser/API automations that then run on their own schedule, deterministically, with no LLM tokens per run.
 
-> The agent writes the automation *once* (using tokens); the workflow then runs forever on a cron with **no tokens per run**. Token-cheap to create, token-free to operate.
+The agent authors the automation once (using tokens); the workflow then runs on a cron or on demand with no tokens per run. Token-cost is in *building* the automation, not *operating* it.
 
-## The brief
+## What it does
 
-- **Problem.** Back-office/RPA automations take days to build and stay locked inside builder UIs. An AI agent can *do* a task once, but re-doing it every run burns tokens and isn't repeatable or schedulable.
-- **Who it's for.** Anyone with a recurring browser/API task — ops, back-office, founders — and the agents acting on their behalf.
-- **Done looks like.** From a chat/agent: *"build a workflow that does X on a schedule."* The agent authors it through this MCP server, deploys it live, runs it, and returns a recording — and it keeps running on its schedule with no tokens.
+This repo is the agent-facing layer: one Vercel Function ([`api/mcp.ts`](api/mcp.ts)) exposing an MCP tool surface that forwards to Automat Studio's public v1 API.
 
-## What we built at Build Day
+- **Discover** — `get_docs`, `get_workflow_schema`, and `list_*` tools so an agent can explore a project's workflows, schedules, secrets, and resources without prior context.
+- **Build** — `create_workflow` and a composite-patch `edit_workflow` (plus a surgical find/replace `edit_node_code` for code changes), backed by `read_workflow` for the current graph/definition.
+- **Manage** — version history, lifecycle promotion (`development` → `preview` → `active` → `disabled`), and schedules.
+- **Run & debug** — `run_workflow`, `get_run` with timeline/IO/recording, and `cancel_run`.
+- **`get_docs`** — serves the runtime's authoring model (code-node globals, `$('NodeName')`, `fetch`, worked examples) so an agent can write working `code` nodes with no access to the runtime source.
+- **Pass-through auth** — the caller's Studio personal access token is forwarded per request; no credentials are stored in this repo.
 
-This repo is the **agent-facing layer**: one Vercel Function (`api/mcp.ts`) exposing **35 MCP tools** that forward to Automat Studio's public v1 API.
-
-- **Full tool surface** — discover (`get_docs`, `get_workflow_schema`, `list_*`), **build** (`create_workflow`, `edit_workflow` composite-patch model, `read_workflow`), manage (versions, lifecycle, schedules), **run & debug** (`run_workflow`, `get_run` with timeline/io/recording, `cancel_run`), plus secrets, resources, extractors, and HITL.
-- **`get_docs`** — serves the runtime authoring model (code-node globals, `$('NodeName')`, `fetch`, worked examples) so an agent writes working `code` nodes with no source access.
-- **Pass-through auth** — the caller's personal access token is forwarded per request; **no credentials are stored** in this repo.
-
-## Demo — "Sauce Demo Shopper"
-
-A Claude agent built this **through the MCP server**: a deterministic Playwright `code` node that logs into saucedemo.com, adds an item, and checks out — **recorded**, ~9s/run, **0 tokens per run**, deployed `active` and schedulable.
-
-- Authored via `create_workflow` + `edit_workflow`, executed via `run_workflow`, recording fetched via `get_run(include:["recording"])`.
-- When the live run hit a native Chrome "breached-password" dialog that swallowed clicks, the agent reproduced it with Chrome DevTools and rewrote the clicks as `page.evaluate(() => el.click())` — **self-corrected**, then re-ran green.
-
-## Try it / verify
-
-Live, and "done" is verifiable by the model with no human in the loop:
-
-- **Responding URL** — `https://workflows.runautomat.com/api/mcp` answers `tools/list` and `tools/call` over Streamable HTTP.
-- **Connect any MCP client** with a Studio personal access token (see [Connect a client](#connect-a-client)) and run the loop: `get_docs` → `create_workflow` → `run_workflow` → `get_run`.
-- **Acceptance checklist (rubric).** (1) endpoint lists **35 tools**; (2) `create_workflow` + `edit_workflow(patch)` each save a new version; (3) `run_workflow` → `get_run` returns `status:"completed"` with structured `output`; (4) a browser workflow returns a `recordingUrl`.
-
-## How Claude built it (Opus 4.8)
-
-Opus 4.8 drove the whole build: it explored the studio + runtime repos to design the tool schemas, grounded the descriptions in MCP best practices, and **self-verified** — running a full stress test across every tool and real workflow runs *through its own tools*, then fixing a live browser failure with Chrome DevTools. It's repeatable: push to `main` auto-deploys, and `get_docs` + the tool surface let any agent rerun the build loop on a brand-new task.
+See [Tools](#tools) below for the full reference.
 
 ## Endpoint
 
@@ -102,18 +82,18 @@ claude mcp add --transport http automat \
 **MCP Inspector**
 
 ```bash
-npm run inspector
+pnpm run inspector
 # Streamable HTTP → https://workflows.runautomat.com/api/mcp?api_key=pat_…&project_id=<uuid>
 ```
 
 ## Development
 
 ```bash
-npm install
-npm run dev          # vercel dev → http://localhost:3000/api/mcp
-npm run inspector    # MCP Inspector
-npm run verify       # typecheck, lint, format check, and tests with coverage
-npm run deploy       # deploy (requires vercel login)
+pnpm install
+pnpm run dev          # vercel dev → http://localhost:3000/api/mcp
+pnpm run inspector    # MCP Inspector
+pnpm run verify       # typecheck, lint, format check, and tests with coverage
+pnpm run deploy       # deploy (requires vercel login)
 ```
 
 ## Stack
