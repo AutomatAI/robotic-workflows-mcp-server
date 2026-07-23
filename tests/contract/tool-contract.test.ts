@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { connectTestClient } from "../helpers/mcp-harness.js";
+import { describe, expect, it, vi } from "vitest";
+import { connectTestClient, createStudioFetchFixture, jsonResponse } from "../helpers/mcp-harness.js";
 
 type ToolClassification =
   | { kind: "local" }
@@ -202,6 +202,85 @@ describe("registered tool contract", () => {
       }
     } finally {
       await client.close();
+    }
+  });
+
+  it("verifies recorded fixture requests against declared operations for a representative sample of tools", async () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const cases: {
+      tool: string;
+      args: Record<string, unknown>;
+      method: string;
+      pathname: string;
+      responder: () => Response;
+    }[] = [
+      {
+        tool: "list_workflows",
+        args: {},
+        method: "GET",
+        pathname: `/api/v1/projects/${projectId}/workflows`,
+        responder: () => jsonResponse({ workflows: [], currentPage: 1, totalPages: 1 }),
+      },
+      {
+        tool: "create_workflow",
+        args: { name: "Contract test workflow" },
+        method: "POST",
+        pathname: `/api/v1/projects/${projectId}/workflows`,
+        responder: () =>
+          jsonResponse({ workflow: { id: "workflow-1" }, version: { id: "version-1", versionNumber: 1 } }),
+      },
+      {
+        tool: "update_workflow",
+        args: { workflowId: "workflow-1", name: "Renamed" },
+        method: "PATCH",
+        pathname: `/api/v1/projects/${projectId}/workflows/workflow-1`,
+        responder: () => jsonResponse({ workflow: { id: "workflow-1", name: "Renamed" } }),
+      },
+      {
+        tool: "delete_workflow",
+        args: { workflowId: "workflow-1" },
+        method: "DELETE",
+        pathname: `/api/v1/projects/${projectId}/workflows/workflow-1`,
+        responder: () => jsonResponse({ deleted: true }),
+      },
+      {
+        tool: "list_runs",
+        args: {},
+        method: "GET",
+        pathname: `/api/v1/projects/${projectId}/sessions`,
+        responder: () => jsonResponse({ sessions: [], currentPage: 1, totalPages: 1 }),
+      },
+      {
+        tool: "list_secrets",
+        args: { dopplerProject: "proj", dopplerConfig: "dev" },
+        method: "GET",
+        pathname: `/api/v1/projects/${projectId}/secrets`,
+        responder: () => jsonResponse({ secrets: [] }),
+      },
+    ];
+
+    for (const { tool, args, method, pathname, responder } of cases) {
+      const classification = toolClassifications[tool as keyof typeof toolClassifications];
+      expect(classification.kind, `${tool} classification`).not.toBe("local");
+
+      const fixture = createStudioFetchFixture((request) => {
+        expect(request.method, `${tool} method`).toBe(method);
+        expect(request.url.pathname, `${tool} pathname`).toBe(pathname);
+        return responder();
+      });
+      vi.stubGlobal("fetch", fixture.fetch);
+      const { client } = await connectTestClient();
+      try {
+        await client.callTool({ name: tool, arguments: args });
+        expect(fixture.requests.length, `${tool} recorded exactly one matching request`).toBeGreaterThanOrEqual(1);
+        const declaredMethods = (classification as { operations: readonly string[] }).operations.map(
+          (op) => op.split(" ")[0],
+        );
+        expect(declaredMethods, `${tool} declared operations include ${method}`).toContain(method);
+      } finally {
+        await client.close();
+        vi.unstubAllGlobals();
+      }
     }
   });
 

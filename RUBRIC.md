@@ -18,7 +18,7 @@
 | 7 | **Recording** | A browser workflow run returns a `recordingUrl` via `get_run(include:['recording'])`. |
 | 8 | **Secrets** | `set_secrets` stores a value; a code node reads `secrets.KEY` at runtime (native injection). |
 | 9 | **No secrets in repo** | The repo contains no credentials — auth is pass-through (the caller's PAT is forwarded per request). |
-| 10 | **Repository verification** | `npm ci` followed by `npm run verify` succeeds without network calls to Studio. |
+| 10 | **Repository verification** | `pnpm install --frozen-lockfile` followed by `pnpm run verify` succeeds without network calls to Studio. |
 
 ## One-pass end-to-end check
 

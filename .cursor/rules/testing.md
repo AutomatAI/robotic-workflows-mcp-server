@@ -15,4 +15,5 @@ alwaysApply: false
 - Keep local-tool tests separate from Studio-backed tool-result tests.
 - Characterize known gaps without asserting that the defect is desired behavior.
 - Pure workflow patch tests may import the minimal `applyWorkflowPatch` test seam. Do not extract tool domains solely to make them mockable.
+- Any test touching the remembered-`set_project` fallback must call the `__resetMemFallbackForTests` seam in setup/teardown — the module-scoped in-process map otherwise leaks state across tests in one process.
 - Coverage should reveal unexercised endpoint behavior; never add tests that only duplicate TypeScript.

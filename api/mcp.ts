@@ -59,6 +59,16 @@ const redis =
     : null;
 const memFallback = new Map<string, { projectId: string; at: number }>();
 
+/**
+ * Test seam: clears the in-process `set_project` fallback map. The map is
+ * module-scoped and persists across tests in one process — call this in a
+ * test's setup/teardown before asserting on remembered-project behavior so
+ * one test's `set_project` state can't leak into another.
+ */
+export function __resetMemFallbackForTests(): void {
+  memFallback.clear();
+}
+
 function tokenBucket(): string | null {
   const key = callerKey.getStore();
   return key ? createHash("sha256").update(key).digest("hex") : null;

@@ -2,11 +2,11 @@
 
 ## Setup
 
-Use the Node version in `.node-version` and npm version declared by `packageManager`.
+Use the Node version in `.node-version` and pnpm version declared by `packageManager`.
 
 ```bash
-npm ci
-npm run verify
+pnpm install --frozen-lockfile
+pnpm run verify
 ```
 
 Copy `.env.example` to `.env.local` only when running the endpoint manually. Never commit credentials.
@@ -17,13 +17,13 @@ Copy `.env.example` to `.env.local` only when running the endpoint manually. Nev
 2. Inspect the current diff and preserve unrelated work.
 3. Keep the single `api/mcp.ts` endpoint and make the smallest compatible change.
 4. Add or update unit, contract, and protocol tests as appropriate.
-5. Run `npm run fix`, then `npm run verify`.
+5. Run `pnpm run fix`, then `pnpm run verify`.
 6. Run `/deep-review` before opening a pull request.
 
 The MCP Inspector is a manual aid:
 
 ```bash
-npm run inspector
+pnpm run inspector
 ```
 
 It does not replace automated protocol tests.

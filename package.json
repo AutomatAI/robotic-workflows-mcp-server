@@ -1,14 +1,13 @@
 {
   "name": "robotic-workflows-mcp-server",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "description": "MCP server for Automat robotic (RPA) workflows — lets AI agents build, deploy and manage workflows the way humans do in the studio.",
   "type": "module",
   "engines": {
-    "node": ">=22 <25",
-    "npm": "11.6.0"
+    "node": ">=22 <25"
   },
-  "packageManager": "npm@11.6.0",
+  "packageManager": "pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72",
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod",
@@ -16,12 +15,12 @@
     "lint": "biome lint .",
     "format:check": "biome format .",
     "fix": "biome check --write .",
-    "test": "npm run test:unit && npm run test:contract && npm run test:protocol",
+    "test": "pnpm run test:unit && pnpm run test:contract && pnpm run test:protocol",
     "test:unit": "vitest run tests/unit",
     "test:contract": "vitest run tests/contract",
     "test:protocol": "vitest run tests/protocol",
     "test:coverage": "vitest run --coverage",
-    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run test:coverage",
+    "verify": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test:coverage",
     "inspector": "mcp-inspector"
   },
   "dependencies": {
