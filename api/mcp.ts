@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { Redis } from "@upstash/redis";
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
+import studioContractProjection from "../contracts/studio-programmatic-access-operations.json" with { type: "json" };
 import packageJson from "../package.json" with { type: "json" };
 
 /**
@@ -201,6 +202,12 @@ class ApiError extends Error {
   }
 }
 
+const STUDIO_STABLE_ERROR_CODES = new Set(
+  studioContractProjection.operations.flatMap((operation) =>
+    "stableErrorCodes" in operation ? operation.stableErrorCodes : [],
+  ),
+);
+
 interface ApiOpts {
   query?: Record<string, unknown>;
   body?: unknown;
@@ -282,8 +289,9 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
     }
   }
   if (!res.ok) {
-    const apiCode = data?.error || `http_${res.status}`;
-    const message = data?.message || data?.error || text || res.statusText;
+    const apiCode = data?.code ?? data?.error ?? `http_${res.status}`;
+    const message =
+      res.status >= 500 ? "Studio request failed." : data?.message || data?.error || res.statusText || "Studio request failed.";
     throw new ApiError(res.status, String(apiCode), String(message), data?.issues);
   }
   return data;
@@ -299,18 +307,19 @@ const result = (data: Record<string, unknown>) => ({
 function ourCode(status: number, apiCode?: string): string {
   if (
     apiCode &&
-    [
-      "not_found",
-      "validation_failed",
-      "version_conflict",
-      "conflict",
-      "lifecycle_gated",
-      "forbidden",
-      "bad_request",
-      "rate_limited",
-      "unauthorized",
-      "internal_error",
-    ].includes(apiCode)
+    ([
+        "not_found",
+        "validation_failed",
+        "version_conflict",
+        "conflict",
+        "lifecycle_gated",
+        "forbidden",
+        "bad_request",
+        "rate_limited",
+        "unauthorized",
+        "internal_error",
+      ].includes(apiCode) ||
+      STUDIO_STABLE_ERROR_CODES.has(apiCode))
   ) {
     return apiCode;
   }
@@ -1975,7 +1984,7 @@ const baseHandler = createMcpHandler(
       },
     );
 
-    // ---- Extractors (not in v1 API yet) ----
+    // ---- Extractors ----
     server.registerTool(
       "list_extractors",
       {

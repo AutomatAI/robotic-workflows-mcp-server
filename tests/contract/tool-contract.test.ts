@@ -196,6 +196,59 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("Studio error mapping", () => {
+  it("preserves generated stable error codes from Studio's code field", async () => {
+    const fixture = createStudioFetchFixture(() =>
+      jsonResponse(
+        { error: "Conflict", code: "resource_conflict", message: "The resource changed concurrently" },
+        { status: 409 },
+      ),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      const response = parseTextResult(
+        await client.callTool({
+          name: "get_resource",
+          arguments: { resourceId: "11111111-1111-4111-8111-111111111112" },
+        }),
+      ) as { error: { code: string; message: string } };
+
+      expect(response.error).toEqual({
+        code: "resource_conflict",
+        status: 409,
+        message: "The resource changed concurrently",
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("preserves stable codes but sanitizes Studio 5xx messages", async () => {
+    const fixture = createStudioFetchFixture(() =>
+      jsonResponse(
+        { error: "Fetch failed", code: "resource_fetch_timeout", message: "private upstream detail" },
+        { status: 502 },
+      ),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      const response = parseTextResult(
+        await client.callTool({ name: "test_resource_api", arguments: { url: "https://example.com/data.json" } }),
+      ) as { error: { code: string; message: string } };
+
+      expect(response.error).toEqual({
+        code: "resource_fetch_timeout",
+        status: 502,
+        message: "Studio request failed.",
+      });
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe("registered tool contract", () => {
   it("matches the characterized tool-name baseline without a numeric count invariant", async () => {
     const { client } = await connectTestClient();
@@ -1904,7 +1957,7 @@ describe("registered tool contract", () => {
         config: { url: "https://example.com/data" },
       });
       expect(response).toMatchObject({
-        error: { code: "bad_request", status: 400, message: "Resource configuration is invalid." },
+        error: { code: "resource_invalid_config", status: 400, message: "Resource configuration is invalid." },
       });
       expect(JSON.stringify(response)).not.toContain(leakedValue);
     } finally {
@@ -2143,7 +2196,7 @@ describe("registered tool contract", () => {
           }),
         ),
       ).toEqual({
-        error: { code: "internal_error", status: 502, message: "Pause failed" },
+        error: { code: "internal_error", status: 502, message: "Studio request failed." },
         partialResult: {
           scheduleId: "schedule-1",
           created: true,
@@ -2222,7 +2275,7 @@ describe("registered tool contract", () => {
           }),
         ),
       ).toEqual({
-        error: { code: "internal_error", status: 502, message: "Second write failed" },
+        error: { code: "internal_error", status: 502, message: "Studio request failed." },
         partialResult: {
           updated: ["FIRST"],
           attemptedKey: "SECOND",
