@@ -12,13 +12,13 @@ importers:
         specifier: 1.26.0
         version: 1.26.0(supports-color@8.1.1)(zod@3.25.76)
       '@upstash/redis':
-        specifier: ^1.34.3
+        specifier: 1.38.0
         version: 1.38.0
       mcp-handler:
         specifier: 1.1.0
         version: 1.1.0(@modelcontextprotocol/sdk@1.26.0(supports-color@8.1.1)(zod@3.25.76))
       zod:
-        specifier: ^3.23.8
+        specifier: 3.25.76
         version: 3.25.76
     devDependencies:
       '@biomejs/biome':
