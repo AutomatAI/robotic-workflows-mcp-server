@@ -12,6 +12,7 @@
     "dev": "vercel dev",
     "deploy": "vercel --prod",
     "typecheck": "tsc --noEmit",
+    "check:dependencies": "node scripts/check-exact-dependencies.mjs",
     "lint": "biome lint .",
     "format:check": "biome format .",
     "fix": "biome check --write .",
@@ -20,7 +21,7 @@
     "test:contract": "vitest run tests/contract",
     "test:protocol": "vitest run tests/protocol",
     "test:coverage": "vitest run --coverage",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test:coverage",
+    "verify": "pnpm run check:dependencies && pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test:coverage",
     "inspector": "mcp-inspector"
   },
   "dependencies": {
