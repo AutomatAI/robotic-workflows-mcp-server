@@ -1,23 +1,42 @@
 {
   "name": "robotic-workflows-mcp-server",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "description": "MCP server for Automat robotic (RPA) workflows — lets AI agents build, deploy and manage workflows the way humans do in the studio.",
   "type": "module",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "packageManager": "pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72",
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod",
-    "inspector": "npx @modelcontextprotocol/inspector"
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint .",
+    "format:check": "biome format .",
+    "fix": "biome check --write .",
+    "test": "pnpm run test:unit && pnpm run test:contract && pnpm run test:protocol",
+    "test:unit": "vitest run tests/unit",
+    "test:contract": "vitest run tests/contract",
+    "test:protocol": "vitest run tests/protocol",
+    "test:coverage": "vitest run --coverage",
+    "verify": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test:coverage",
+    "inspector": "mcp-inspector"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "@upstash/redis": "^1.34.3",
-    "mcp-handler": "^1.1.0",
+    "mcp-handler": "1.1.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.6.0",
-    "vercel": "^54.0.0"
+    "@biomejs/biome": "2.5.5",
+    "@modelcontextprotocol/inspector": "1.0.0",
+    "@types/node": "22.19.21",
+    "@vitest/coverage-v8": "4.1.10",
+    "tsx": "4.23.1",
+    "typescript": "5.9.3",
+    "vercel": "54.13.0",
+    "vitest": "4.1.10"
   }
 }

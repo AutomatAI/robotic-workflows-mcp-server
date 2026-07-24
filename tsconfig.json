@@ -10,8 +10,8 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node", "vitest/globals"]
   },
-  "include": ["api/**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": ["api/**/*.ts", "src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "*.config.ts"],
+  "exclude": ["node_modules", "coverage"]
 }
