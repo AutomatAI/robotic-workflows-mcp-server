@@ -360,6 +360,55 @@ describe("registered tool contract", () => {
     }
   });
 
+  it("create_workflow forwards runtimeVersion into the persisted definition instead of dropping it", async () => {
+    const fixture = createStudioFetchFixture(() =>
+      jsonResponse({
+        workflow: { id: "workflow-1", status: "development" },
+        version: { id: "version-1", versionNumber: 1 },
+      }),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      const called = parseTextResult(
+        await client.callTool({
+          name: "create_workflow",
+          arguments: { name: "Pinned workflow", runtimeVersion: "1.2.3" },
+        }),
+      ) as { error?: unknown };
+      expect(called.error).toBeUndefined();
+
+      const recorded = fixture.requests[0];
+      expect(recorded.method).toBe("POST");
+      expect(recorded.body).toEqual({
+        definition: expect.objectContaining({ name: "Pinned workflow", runtimeVersion: "1.2.3" }),
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("get_workflow_schema forwards runtimeVersion as a query parameter and echoes Studio's response", async () => {
+    const fixture = createStudioFetchFixture(() =>
+      jsonResponse({ schema: { type: "object" }, requestedRuntimeVersion: "1.2.3" }),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      const called = parseTextResult(
+        await client.callTool({ name: "get_workflow_schema", arguments: { runtimeVersion: "1.2.3" } }),
+      ) as { runtimeVersion?: string; jsonSchema?: unknown };
+      expect(called.runtimeVersion).toBe("1.2.3");
+      expect(called.jsonSchema).toEqual({ type: "object" });
+
+      const recorded = fixture.requests[0];
+      expect(recorded.method).toBe("GET");
+      expect(recorded.url.searchParams.get("runtimeVersion")).toBe("1.2.3");
+    } finally {
+      await client.close();
+    }
+  });
+
   it("fixture-exercises every declared path of every multi-operation tool", async () => {
     const ids = {
       projectId: "11111111-1111-4111-8111-111111111111",
@@ -668,26 +717,27 @@ describe("registered tool contract", () => {
     }
   });
 
-  it("refuses PAT-global remembered project state when connector identity is absent", async () => {
-    const studioFetch = vi.fn();
-    vi.stubGlobal("fetch", studioFetch);
+  it("falls back to PAT-global remembered project state when connector identity is absent", async () => {
+    const projectId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const fixture = createStudioFetchFixture((request) => {
+      if (request.url.pathname === "/api/v1/projects") {
+        return jsonResponse({ projects: [{ id: projectId, name: "A" }], currentPage: 1, totalPages: 1 });
+      }
+      return jsonResponse({ workflows: [], currentPage: 1, totalPages: 1 });
+    });
+    vi.stubGlobal("fetch", fixture.fetch);
+    // No connectionId configured — this mirrors a real client that never
+    // receives an Mcp-Session-Id, since this endpoint runs stateless.
     const { client } = await connectTestClient({ projectId: null });
     try {
-      expect(
-        parseTextResult(
-          await client.callTool({
-            name: "set_project",
-            arguments: { projectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
-          }),
-        ),
-      ).toEqual({
-        error: {
-          code: "bad_request",
-          status: 400,
-          message: expect.stringContaining("logical connector identity"),
-        },
+      expect(parseTextResult(await client.callTool({ name: "set_project", arguments: { projectId } }))).toEqual({
+        projectId,
+        validated: true,
       });
-      expect(studioFetch).not.toHaveBeenCalled();
+
+      await client.callTool({ name: "list_workflows", arguments: {} });
+      const workflowRequest = fixture.requests.find((request) => request.url.pathname.endsWith("/workflows"));
+      expect(workflowRequest?.url.pathname).toBe(`/api/v1/projects/${projectId}/workflows`);
     } finally {
       await client.close();
     }

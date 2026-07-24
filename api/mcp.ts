@@ -42,15 +42,22 @@ const callerConnection = new AsyncLocalStorage<string>();
 const studioDefaultProjectId = () => process.env.STUDIO_DEFAULT_PROJECT_ID || undefined;
 
 // set_project state: the agent-selected project, persisted in Upstash Redis
-// keyed by a hash of the caller's token AND logical connector identity. The
-// connector identity comes from connection_id / x-connection-id /
-// mcp-session-id. Remembered state is disabled when none is present: silently
-// falling back to one PAT-global bucket would let connectors redirect each other.
-// The server is a stateless, multi-
-// instance serverless function, so an in-process value can't survive across
-// requests — the shared store is what lets `set_project` stick between calls
-// and across cold starts. Precedence: ?project_id= > x-project-id header >
-// remembered set_project selection > STUDIO_DEFAULT_PROJECT_ID.
+// keyed by a hash of the caller's token and, when available, logical
+// connector identity (connection_id / x-connection-id / mcp-session-id).
+// This endpoint runs in STATELESS Streamable HTTP mode (no sessionIdGenerator
+// configured), so mcp-handler never issues an Mcp-Session-Id — ordinary
+// connectors that just point at the base MCP URL will never have one to send.
+// Requiring connector identity would therefore fail `set_project` for nearly
+// every real caller, so the bucket falls back to a PAT-global scope when no
+// connector identity is present, exactly like the sole-tenant case where one
+// PAT belongs to one connector. Connector-scoped isolation (distinct
+// connection_id/x-connection-id per connector) remains available and
+// recommended when multiple connectors share one PAT. The server is a
+// stateless, multi-instance serverless function, so an in-process value can't
+// survive across requests — the shared store is what lets `set_project` stick
+// between calls and across cold starts. Precedence: ?project_id= >
+// x-project-id header > remembered set_project selection >
+// STUDIO_DEFAULT_PROJECT_ID.
 //
 // Falls back to an in-process Map when Redis env is absent (local dev / tests /
 // a single stdio process) — there the Map genuinely persists for the process.
@@ -93,8 +100,13 @@ function tokenBucket(): string | null {
   const key = callerKey.getStore();
   if (!key) return null;
   const connection = callerConnection.getStore();
-  if (!connection) return null;
-  return createHash("sha256").update(key).update("\0").update(connection).digest("hex");
+  // Prefer connector-scoped isolation when the caller supplied one; otherwise
+  // fall back to a token-global bucket so callers with no connection_id /
+  // x-connection-id (i.e. almost everyone, since this endpoint never issues
+  // an Mcp-Session-Id) still get working `set_project` behavior.
+  return connection
+    ? createHash("sha256").update(key).update("\0").update(connection).digest("hex")
+    : createHash("sha256").update(key).digest("hex");
 }
 
 async function rememberedProjectId(): Promise<string | undefined> {
@@ -831,7 +843,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Set project",
         description:
-          "Sets the target Studio project for subsequent calls from this logical connector. Configure connection_id / x-connection-id when multiple connectors share one PAT; mcp-session-id is used automatically when present. An explicit project_id query or x-project-id header remains pinned and takes precedence. Validates access before storing. Returns: { projectId, validated: true }.",
+          "Remembers the target Studio project for later calls from this token (no need to call this if you always pass project_id/x-project-id explicitly, which is the recommended pattern for one-shot/stateless callers). If multiple separate connectors share one PAT, add a stable connection_id query param or x-connection-id header to isolate their selections from each other; without one, the selection is shared by every caller of this token. An explicit project_id query or x-project-id header always takes precedence over this. Validates access before storing. Returns: { projectId, validated: true }.",
         inputSchema: {
           projectId: z.string().uuid().describe("The Studio project UUID — discover it with list_projects."),
         },
@@ -839,14 +851,6 @@ const baseHandler = createMcpHandler(
       },
       async ({ projectId }) => {
         try {
-          const bucket = tokenBucket();
-          if (!bucket) {
-            throw new ApiError(
-              400,
-              "bad_request",
-              "set_project needs a logical connector identity. Add connection_id=<stable-id> to the MCP URL or send x-connection-id; clients with mcp-session-id need no extra configuration.",
-            );
-          }
           // Validate against the DISCOVERY listing (an all-projects token gets
           // an empty-but-200 workflows list even for a nonexistent project id,
           // so probing a project-scoped route can't tell a typo from an empty
@@ -893,7 +897,7 @@ const baseHandler = createMcpHandler(
       async () =>
         result({
           versions: [{ version: "latest", isLatest: true }],
-          note: "Runtime version selection is not exposed by the API; the schema/create endpoints use the deployment default.",
+          note: "Studio does not expose an endpoint that enumerates available runtime versions, so this list is always just 'latest'. You can still pin an exact version string via create_workflow(runtimeVersion)/edit_workflow — Studio does not validate the pin against real availability at save time.",
         }),
     );
 
@@ -919,14 +923,14 @@ const baseHandler = createMcpHandler(
       {
         title: "Get workflow schema",
         description:
-          "Returns the workflow definition JSON Schema (exact field shapes for nodes, edges, settings). Returns: { runtimeVersion, jsonSchema }.",
-        inputSchema: { runtimeVersion: z.string().describe("Defaults to 'latest'.").optional() },
+          "Returns the workflow definition JSON Schema (exact field shapes for nodes, edges, settings). The schema always reflects the Runtime version actually installed on the Studio deployment — `runtimeVersion` is accepted and echoed back but does not select a different historical schema. Returns: { runtimeVersion, jsonSchema }.",
+        inputSchema: { runtimeVersion: z.string().describe("Advisory only — echoed back, does not change the returned schema. Defaults to 'latest'.").optional() },
         annotations: RO,
       },
       async ({ runtimeVersion }) => {
         try {
-          const r = await api("GET", "/api/agent/schema");
-          return result({ runtimeVersion: runtimeVersion ?? "latest", jsonSchema: r.schema });
+          const r = await api("GET", "/api/agent/schema", { query: { runtimeVersion } });
+          return result({ runtimeVersion: r.requestedRuntimeVersion ?? runtimeVersion ?? "latest", jsonSchema: r.schema });
         } catch (e) {
           return fail(e);
         }
@@ -971,12 +975,13 @@ const baseHandler = createMcpHandler(
         },
         annotations: CREATE,
       },
-      async ({ name, description, definition }) => {
+      async ({ name, description, definition, runtimeVersion }) => {
         try {
           const def = {
             ...(definition ?? MIN_DEFINITION(name)),
             name,
             ...(description !== undefined ? { description } : {}),
+            ...(runtimeVersion !== undefined ? { runtimeVersion } : {}),
           };
           const r = await api("POST", "/api/agent/workflows", { body: { definition: def } });
           return result({
@@ -1968,7 +1973,7 @@ const baseHandler = createMcpHandler(
   {
     serverInfo: { name: "automat-robotic-workflows", version: packageJson.version },
     instructions:
-      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: list_projects to discover ids, then set_project (requires connection_id / x-connection-id unless the client sends mcp-session-id) — or pin one on the connection via ?project_id=<uuid> / x-project-id / STUDIO_DEFAULT_PROJECT_ID. Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
+      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: for a one-shot/stateless caller, always pass ?project_id=<uuid> or an x-project-id header on every call (STUDIO_DEFAULT_PROJECT_ID also works) — that is simpler and takes precedence over anything else. For a caller that keeps calling this same connector repeatedly, list_projects to discover ids, then set_project once (add a connection_id query param / x-connection-id header first if multiple separate connectors share this one PAT, so their selections don't collide). Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
       "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit: edit_node_code for surgical find/replace inside one node's code (preferred for code changes — no resending big strings), edit_workflow with a small patch for structural changes (both validate and save a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
       "Lifecycle policy (REQUIRED): development while the agent iterates (default for new workflows; use dryRun:true only when the workflow explicitly implements that convention, because the platform does not suppress arbitrary side effects) → preview ONLY when ready for the human to test → active ONLY after explicit user go-live approval. Never skip to active on your own. get_docs topic:'lifecycle' has the full ladder.\n\n" +
       "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",
