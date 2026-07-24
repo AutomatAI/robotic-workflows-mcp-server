@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { connectTestClient, createStudioFetchFixture, jsonResponse } from "../helpers/mcp-harness.js";
+import { connectTestClient, createStudioFetchFixture, jsonResponse, parseTextResult } from "../helpers/mcp-harness.js";
 
 type ToolClassification =
   | { kind: "local" }
@@ -263,20 +263,23 @@ describe("registered tool contract", () => {
       const classification = toolClassifications[tool as keyof typeof toolClassifications];
       expect(classification.kind, `${tool} classification`).not.toBe("local");
 
-      const fixture = createStudioFetchFixture((request) => {
-        expect(request.method, `${tool} method`).toBe(method);
-        expect(request.url.pathname, `${tool} pathname`).toBe(pathname);
-        return responder();
-      });
+      // Assertions must live outside the responder: a tool's own try/catch
+      // funnels any thrown error (including a failed `expect`) into a normal
+      // `fail()` text result, so an in-responder assertion failure would
+      // never surface as a failing test. Record the request, respond
+      // unconditionally, then assert on what was actually recorded.
+      const fixture = createStudioFetchFixture(() => responder());
       vi.stubGlobal("fetch", fixture.fetch);
       const { client } = await connectTestClient();
       try {
-        await client.callTool({ name: tool, arguments: args });
+        const result = await client.callTool({ name: tool, arguments: args });
+        const parsed = parseTextResult(result) as { error?: unknown };
+        expect(parsed.error, `${tool} tool call succeeded (got ${JSON.stringify(parsed.error)})`).toBeUndefined();
+
         expect(fixture.requests.length, `${tool} recorded exactly one matching request`).toBeGreaterThanOrEqual(1);
-        const declaredMethods = (classification as { operations: readonly string[] }).operations.map(
-          (op) => op.split(" ")[0],
-        );
-        expect(declaredMethods, `${tool} declared operations include ${method}`).toContain(method);
+        const recorded = fixture.requests[0];
+        expect(recorded.method, `${tool} recorded method`).toBe(method);
+        expect(recorded.url.pathname, `${tool} recorded pathname`).toBe(pathname);
       } finally {
         await client.close();
         vi.unstubAllGlobals();
