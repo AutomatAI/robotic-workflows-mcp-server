@@ -1,6 +1,6 @@
 ---
-globs: ["tests/**/*.ts", "vitest.config.ts"]
-paths: ["tests/**/*.ts", "vitest.config.ts"]
+globs: ["tests/**/*.ts", "tests/fixtures/**", "vitest.config.ts"]
+paths: ["tests/**/*.ts", "tests/fixtures/**", "vitest.config.ts"]
 alwaysApply: false
 ---
 

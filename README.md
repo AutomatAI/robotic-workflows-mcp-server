@@ -53,7 +53,7 @@ Replace `pat_…` with your personal access token. A PAT spans every project you
 
 For a one-shot/stateless caller with no durable connection, skip `set_project` entirely and always pass `project_id` / `x-project-id`; this is the safest migration target and already takes precedence. For a recurring connector, `set_project` uses token+connector isolation when the caller supplies a stable `connection_id` query parameter, `x-connection-id` header, or `mcp-session-id` header. Treat `mcp-session-id` as caller-supplied identity; do not assume this stateless endpoint supplies one. Only when none of those identities is present does compatibility behavior use a PAT-global remembered bucket. Every bare caller sharing that PAT then shares one selection, so use a unique PAT per bare connector to prevent collisions. Connections pinned with `project_id` / `x-project-id` need no connector id. Secrets tools additionally need the Doppler identifiers (`dopplerProject`/`dopplerConfig` tool inputs, or `STUDIO_DOPPLER_PROJECT`/`STUDIO_DOPPLER_CONFIG`).
 
-**Token tiers:** read tokens list/inspect most domains (no definition JSON — `read_workflow` `full`/`node` need an authorship-tier PAT; `graph` degrades gracefully); write tokens also run workflows / stop sessions / complete HITL tasks; workflow, schedule, and secret mutations need authorship. Every resource control-plane tool—list, get, test, create, update, and delete—also requires authorship (author role + write token). Tier ledger: studio `docs/PROGRAMMATIC_ACCESS.md`.
+**Token tiers:** read tokens list/inspect most domains (no definition JSON — `read_workflow` `full`/`node` need an authorship-tier PAT; `graph` degrades gracefully); write tokens also run workflows / stop sessions / complete HITL tasks; workflow and schedule mutations need authorship. `list_versions`, `list_secrets`, and every resource control-plane tool—list, get, test, create, update, and delete—also require authorship (author role + write token). Secret set/delete remain authorship-tier as well. Tier ledger: studio `docs/PROGRAMMATIC_ACCESS.md`.
 
 ## Workflow lifecycle policy (for agents)
 
@@ -240,7 +240,7 @@ Authoring guide — **call first**. How to write `code`/`decision` nodes: global
 
 ### `list_versions`
 - Input: `{ workflowId, limit?, cursor?, named?, source? }`
-- Output: `{ items: [{ versionId, versionNumber, name, source, createdAt }], nextCursor, activeVersionId }` → `GET /api/v1/projects/{projectId}/workflows/{id}/versions`
+- Output: `{ items: [{ versionId, versionNumber, name, source, createdAt }], nextCursor, activeVersionId }` → `GET /api/v1/projects/{projectId}/workflows/{id}/versions` · authorship-tier PAT required
 
 ### `get_version`
 - Input: `{ workflowId, versionId }` · Output: `{ versionId, versionNumber, name, source, createdAt, definition }` → `GET …/versions/{versionId}`
@@ -299,7 +299,7 @@ All schedules run in **UTC**. A workflow may have many; run input comes from a l
 Project-scoped. Values are never returned.
 
 ### `list_secrets`
-- Input: `{ lifecycle?, limit?, cursor? }` · Output: `{ items: [{ key, last4, lifecycle, updatedAt }], nextCursor }`
+- Input: `{ dopplerProject?, dopplerConfig?, limit?, cursor? }` · Output: `{ items: [{ key }], dopplerConfigured, nextCursor }` · authorship-tier PAT required; values are never returned
 
 ### `set_secrets`
 - Input: `{ secrets: [{ key, value }], dopplerProject?, dopplerConfig? }` · Output: `{ updated: [keys] }` · name-keyed PUT. If the current write errors, only prior acknowledgements appear in `updated`; `partialResult` reports `{ attemptedKey, outcome:'unknown', remainingKeys }` and never secret values.

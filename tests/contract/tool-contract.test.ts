@@ -368,6 +368,10 @@ describe("registered tool contract", () => {
         expect(operation.pagination.style, `${operation.operationId} pagination style`).toBe("page_page_size");
       }
       expect(operation.requestSchema === null || typeof operation.requestSchema === "object").toBe(true);
+      expect(
+        operation.querySchema === null || typeof operation.querySchema === "object",
+        `${operation.operationId} querySchema`,
+      ).toBe(true);
       if (operation.effectiveTier !== null) {
         expect(operation.effectiveTier).toMatchObject({
           tier: expect.stringMatching(/^(read|write|authorship)$/),
@@ -558,7 +562,7 @@ describe("registered tool contract", () => {
     }
   });
 
-  it.each(["requestLocation", "wrapperTier", "successStatus", "pagination", "stableErrorCodes"])(
+  it.each(["requestLocation", "querySchema", "wrapperTier", "successStatus", "pagination", "stableErrorCodes"])(
     "rejects an upstream operation missing required %s metadata",
     (field) => {
       const directory = mkdtempSync(join(tmpdir(), "automat-mcp-contract-invalid-"));

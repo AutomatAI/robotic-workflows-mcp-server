@@ -79,6 +79,9 @@ const operations = source.operations.map((operation, index) => {
   ) {
     throw new Error(`Studio operation ${operation.operationId} has invalid pagination metadata.`);
   }
+  if (!Object.hasOwn(operation, "querySchema")) {
+    throw new Error(`Studio operation ${operation.operationId} is missing querySchema.`);
+  }
   if (
     operation.querySchema !== undefined &&
     operation.querySchema !== null &&
