@@ -32,7 +32,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.5",
     "@modelcontextprotocol/inspector": "1.0.0",
-    "@types/node": "22.19.21",
+    "@types/node": "26.1.1",
     "@vitest/coverage-v8": "4.1.10",
     "tsx": "4.23.1",
     "typescript": "5.9.3",
