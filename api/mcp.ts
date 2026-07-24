@@ -36,27 +36,37 @@ const VERCEL_BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 // the request's lifetime.
 const callerKey = new AsyncLocalStorage<string>();
 // Connection-scoped target project (a PAT spans projects, so the credential no
-// longer implies one). Resolved per request: ?project_id= → x-project-id header
-// → STUDIO_DEFAULT_PROJECT_ID env.
+// longer implies one). Explicit selectors are resolved per request.
 const callerProject = new AsyncLocalStorage<string>();
-const STUDIO_DEFAULT_PROJECT_ID = process.env.STUDIO_DEFAULT_PROJECT_ID || undefined;
+const callerConnection = new AsyncLocalStorage<string>();
+const studioDefaultProjectId = () => process.env.STUDIO_DEFAULT_PROJECT_ID || undefined;
 
 // set_project state: the agent-selected project, persisted in Upstash Redis
-// keyed by a hash of the caller's token. The server is a stateless, multi-
+// keyed by a hash of the caller's token AND logical connector identity. The
+// connector identity comes from connection_id / x-connection-id /
+// mcp-session-id. Remembered state is disabled when none is present: silently
+// falling back to one PAT-global bucket would let connectors redirect each other.
+// The server is a stateless, multi-
 // instance serverless function, so an in-process value can't survive across
 // requests — the shared store is what lets `set_project` stick between calls
-// and across cold starts. Precedence: set_project (this store) > ?project_id=
-// connection param / x-project-id header > STUDIO_DEFAULT_PROJECT_ID.
+// and across cold starts. Precedence: ?project_id= > x-project-id header >
+// remembered set_project selection > STUDIO_DEFAULT_PROJECT_ID.
 //
 // Falls back to an in-process Map when Redis env is absent (local dev / tests /
 // a single stdio process) — there the Map genuinely persists for the process.
 const REMEMBERED_PROJECT_TTL_S = 6 * 60 * 60; // 6h
 const projectKey = (bucket: string) => `pat:project:${bucket}`;
 
-const redis =
+export interface RememberedProjectRedis {
+  get<T>(key: string): Promise<T | null>;
+  set(key: string, value: string, options: { ex: number }): Promise<unknown>;
+}
+
+const configuredRedis: RememberedProjectRedis | null =
   process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN
     ? new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN })
     : null;
+let redis = configuredRedis;
 const memFallback = new Map<string, { projectId: string; at: number }>();
 
 /**
@@ -69,21 +79,35 @@ export function __resetMemFallbackForTests(): void {
   memFallback.clear();
 }
 
+/** Test seam for deterministic Redis-path coverage without live infrastructure. */
+export function __setRedisForTests(client: RememberedProjectRedis | null): void {
+  redis = client;
+}
+
+/** Restores the environment-configured Redis client after a test override. */
+export function __resetRedisForTests(): void {
+  redis = configuredRedis;
+}
+
 function tokenBucket(): string | null {
   const key = callerKey.getStore();
-  return key ? createHash("sha256").update(key).digest("hex") : null;
+  if (!key) return null;
+  const connection = callerConnection.getStore();
+  if (!connection) return null;
+  return createHash("sha256").update(key).update("\0").update(connection).digest("hex");
 }
 
 async function rememberedProjectId(): Promise<string | undefined> {
   const bucket = tokenBucket();
   if (!bucket) return undefined;
   if (redis) {
-    // Best-effort read: a Redis blip must never break auth — treat as "no
-    // remembered project", which self-heals via a set_project re-run.
+    // Best-effort read: a Redis blip must never break auth. The local fallback
+    // may contain a write that Redis failed to acknowledge on this instance.
     try {
-      return (await redis.get<string>(projectKey(bucket))) ?? undefined;
+      const remembered = (await redis.get<string>(projectKey(bucket))) ?? undefined;
+      if (remembered) return remembered;
     } catch {
-      return undefined;
+      // Fall through to the connector-scoped in-process fallback.
     }
   }
   const entry = memFallback.get(bucket);
@@ -95,22 +119,34 @@ async function rememberedProjectId(): Promise<string | undefined> {
   return entry.projectId;
 }
 
+function rememberProjectInMemory(bucket: string, projectId: string): void {
+  if (memFallback.size >= 1000) memFallback.clear();
+  memFallback.set(bucket, { projectId, at: Date.now() });
+}
+
 async function rememberProject(projectId: string): Promise<void> {
   const bucket = tokenBucket();
   if (!bucket) return;
   if (redis) {
-    await redis.set(projectKey(bucket), projectId, { ex: REMEMBERED_PROJECT_TTL_S });
-    return;
+    try {
+      await redis.set(projectKey(bucket), projectId, { ex: REMEMBERED_PROJECT_TTL_S });
+      // Mirror every acknowledged Redis write locally so a later read outage
+      // preserves connector continuity on this instance.
+      rememberProjectInMemory(bucket, projectId);
+      return;
+    } catch {
+      // Keep this connector usable on the current instance. The key remains
+      // token+connector scoped, so another logical connector cannot inherit it.
+    }
   }
-  if (memFallback.size >= 1000) memFallback.clear();
-  memFallback.set(bucket, { projectId, at: Date.now() });
+  rememberProjectInMemory(bucket, projectId);
 }
 
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers":
-    "content-type, authorization, x-api-key, x-project-id, mcp-session-id, mcp-protocol-version",
+    "content-type, authorization, x-api-key, x-project-id, x-connection-id, mcp-session-id, mcp-protocol-version",
   "Access-Control-Expose-Headers": "mcp-session-id",
 };
 
@@ -125,10 +161,14 @@ function extractKey(req: Request): string | null {
 }
 
 function extractProjectId(req: Request): string | undefined {
+  return new URL(req.url).searchParams.get("project_id") ?? req.headers.get("x-project-id") ?? undefined;
+}
+
+function extractConnectionId(req: Request): string | undefined {
   return (
-    new URL(req.url).searchParams.get("project_id") ??
-    req.headers.get("x-project-id") ??
-    STUDIO_DEFAULT_PROJECT_ID ??
+    new URL(req.url).searchParams.get("connection_id") ??
+    req.headers.get("x-connection-id") ??
+    req.headers.get("mcp-session-id") ??
     undefined
   );
 }
@@ -153,9 +193,9 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
   const key = callerKey.getStore();
   if (!key) throw new ApiError(401, "unauthorized", "Missing API key.");
 
-  // Single choke point for the /api/agent → /api/v1 repoint: every tool still
-  // names the legacy /api/agent/* path; it is rewritten here onto the PAT
-  // surface. `/api/agent/schema` is the one project-agnostic endpoint.
+  // Single choke point for the internal route aliases → current PAT v1 routes.
+  // Only characterized domains are accepted, so a stale alias can never leak
+  // through as a Studio request.
   let resolvedPath = path;
   if (path.startsWith("/api/agent/")) {
     if (path === "/api/agent/schema") {
@@ -165,7 +205,20 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
       // so it must not require one.
       resolvedPath = "/api/v1/projects";
     } else {
-      const projectId = (await rememberedProjectId()) ?? callerProject.getStore();
+      const suffix = path.slice("/api/agent/".length);
+      const domain = suffix.split("/")[0];
+      const allowedDomains = new Set([
+        "workflows",
+        "sessions",
+        "hitl",
+        "secrets",
+        "resources",
+        "extractors",
+      ]);
+      if (!domain || !allowedDomains.has(domain)) {
+        throw new ApiError(500, "config_error", `No Studio v1 route mapping exists for ${path}.`);
+      }
+      const projectId = callerProject.getStore() ?? (await rememberedProjectId()) ?? studioDefaultProjectId();
       if (!projectId) {
         throw new ApiError(
           400,
@@ -173,7 +226,7 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
           "Missing project id — call the set_project tool with the project UUID (preferred), or add ?project_id=<uuid> to the MCP URL / an x-project-id header / STUDIO_DEFAULT_PROJECT_ID."
         );
       }
-      resolvedPath = `/api/v1/projects/${projectId}/${path.slice("/api/agent/".length)}`;
+      resolvedPath = `/api/v1/projects/${projectId}/${suffix}`;
     }
   }
   const url = new URL(STUDIO_API_BASE_URL + resolvedPath);
@@ -224,7 +277,24 @@ const result = (data: Record<string, unknown>) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
 
-function ourCode(status: number): string {
+function ourCode(status: number, apiCode?: string): string {
+  if (
+    apiCode &&
+    [
+      "not_found",
+      "validation_failed",
+      "version_conflict",
+      "conflict",
+      "lifecycle_gated",
+      "forbidden",
+      "bad_request",
+      "rate_limited",
+      "unauthorized",
+      "internal_error",
+    ].includes(apiCode)
+  ) {
+    return apiCode;
+  }
   switch (status) {
     case 400: return "bad_request";
     case 401: return "unauthorized";
@@ -237,19 +307,26 @@ function ourCode(status: number): string {
   }
 }
 
-function fail(e: unknown) {
+function fail(e: unknown, partialResult?: Record<string, unknown>) {
   if (e instanceof ApiError) {
     return result({
       error: {
-        code: ourCode(e.status),
+        code: ourCode(e.status, e.apiCode),
         status: e.status,
         message: e.message,
         ...(e.issues ? { issues: e.issues } : {}),
       },
+      ...(partialResult ? { partialResult } : {}),
     });
   }
-  return result({ error: { code: "internal_error", message: e instanceof Error ? e.message : String(e) } });
+  return result({
+    error: { code: "internal_error", message: "Unexpected MCP server error." },
+    ...(partialResult ? { partialResult } : {}),
+  });
 }
+
+const toolFailure = (status: number, message: string, apiCode?: string, issues?: unknown) =>
+  fail(new ApiError(status, apiCode ?? ourCode(status), message, issues));
 
 // Pagination: our tools speak {limit, cursor}/{items, nextCursor}; the API speaks
 // {page, pageSize}/{..., totalPages, currentPage}. Translate the cursor as a page number.
@@ -317,11 +394,38 @@ function applyNodeOps(next: any, ops: any) {
   }
 }
 
+const edgeMatches = (edge: any, target: any) =>
+  target.from === edge.from &&
+  target.to === edge.to &&
+  (Object.hasOwn(target, "handle") ? target.handle === edge.handle : !Object.hasOwn(edge, "handle"));
+
 function applyEdgeOps(next: any, ops: any) {
   if (ops.remove?.length) {
+    for (const target of ops.remove) {
+      const matches = (next.edges ?? []).filter((edge: any) => edgeMatches(edge, target)).length;
+      if (matches !== 1) {
+        throw new Error(
+          `Cannot remove edge ${target.from} → ${target.to}${target.handle !== undefined ? ` (handle "${target.handle}")` : " (no handle)"}: expected exactly one match, found ${matches}.`,
+        );
+      }
+    }
     next.edges = (next.edges ?? []).filter(
-      (e: any) => !ops.remove.some((t: any) => t.from === e.from && t.to === e.to),
+      (edge: any) => !ops.remove.some((target: any) => edgeMatches(edge, target)),
     );
+  }
+  if (ops.update?.length) {
+    for (const { from, to, handle, patch } of ops.update) {
+      const target = { from, to, ...(handle !== undefined ? { handle } : {}) };
+      const matches = next.edges
+        .map((edge: any, index: number) => (edgeMatches(edge, target) ? index : -1))
+        .filter((index: number) => index >= 0);
+      if (matches.length !== 1) {
+        throw new Error(
+          `Cannot update edge ${from} → ${to}${handle !== undefined ? ` (handle "${handle}")` : " (no handle)"}: expected exactly one match, found ${matches.length}.`,
+        );
+      }
+      next.edges[matches[0]] = { ...next.edges[matches[0]], ...patch };
+    }
   }
   if (ops.add?.length) {
     const known = new Set(next.nodes.map((nd: any) => nd.name));
@@ -365,7 +469,7 @@ const Lifecycle = z.enum(["development", "preview", "active"]);
 // descriptions so an agent can author nodes without a separate get_workflow_schema
 // call (which remains the full reference). Kept tight to respect the ~2KB budget.
 const CODE_MODEL =
-  "Node types: start, end, block, decision, document, hitl. A `block` is deterministic `code` (mode:'code', the default — no LLM tokens) or AI `execute` (mode:'execute' — costs tokens; prefer code). Block code runs async (await + TypeScript) and must `return` a value; in-scope globals: `page` & `context` (Playwright), `$('NodeName')` (a prior node's return), `secrets`, `helpers`, `projectResources`, `logger`. A `decision` routes by ordered boolean `branches:[{id,label?,expression}]` (same globals; first true wins) — one outgoing edge per branch with `handle:<branch id>` plus one `handle:'else'` edge for no-match. Browser recording: settings.browser={headless:false,recording:true}.";
+  "Node types: start, end, block, decision, document, hitl. A `block` is deterministic `code` (mode:'code', the default — no LLM tokens) or AI `execute` (mode:'execute' — costs tokens; prefer code). Block code runs async (await + TypeScript) and must `return` a value; in-scope globals include `page`/`context` (Playwright), `$('NodeName')`, `secrets`, `helpers`, `projectResources` (including update/merge), `logger`, `emit`, `state`, and `files`. A `decision` routes by ordered boolean `branches:[{id,label?,expression}]` (scope: page/context/$/logger/helpers/projectResources plus runtime libraries; first true wins) — one outgoing edge per branch with `handle:<branch id>` plus one `handle:'else'` edge for no-match. Browser recording: settings.browser={headless:false,recording:true}.";
 const CODE_EXAMPLE =
   "Example block — {type:'block',name:'Fetch',mode:'code',position:{x:160,y:0},code:\"await page.goto('https://example.com'); return { title: await page.title() };\"}";
 
@@ -385,9 +489,12 @@ const DOCS = {
       "page, context": "Playwright Page/BrowserContext — present only when settings.browser is set.",
       secrets: "Project secrets by name: secrets.MY_KEY (set via set_secrets; injected at runtime).",
       "helpers, projectResources":
-        "helpers.<name> are shared functions defined in the definition's top-level `helpers:[{name,description?,code}]` array (read them via read_workflow view:'full'; graph view lists their names). projectResources.<name> are named project data resources.",
+        "helpers.<name> are shared functions defined in the definition's top-level `helpers:[{name,description?,code}]` array (read them via read_workflow view:'full'; graph view lists their names). projectResources.<name> are named project data resources; code blocks and helpers can persist workflow-owned resources with projectResources.update(name,value) / merge(name,patch).",
       logger: "logger.info(msg) / logger.error(msg).",
-      "emit, state": "emit(title,event,data) for events; state.sessions.previous / state.artifacts for cross-run state.",
+      "emit, state":
+        "emit(title,eventName,data?,options?) is available in code blocks. state exposes sessions.previous, artifacts, claim, and setSessionField in code blocks; availability depends on workflow settings and runtime support.",
+      files:
+        "files.download/fromDownload/upload/getSignedUrl provide run-scoped file I/O in code blocks and helpers. Use projectResources.<name>.local_path for attached project files.",
     },
   },
   nodeTypes: {
@@ -395,7 +502,7 @@ const DOCS = {
     end: "Exit point; passes through the previous node's output.",
     block: "Runs code (mode:'code') or an AI agent (mode:'execute' — costs tokens; prefer code). Fields: name, position, mode, code | (instructions + execute).",
     decision:
-      "Ordered `branches:[{id, label?, expression}]` — each expression is a JS boolean (same scope as code); the first true branch wins. Route one outgoing edge per branch with handle=<branch id>, plus exactly one catch-all edge with handle:'else' (label it via the node's `elseLabel`). Branch ids are stable routing keys — never 'else', never renamed when the label changes. (Legacy binary form — a single `expression` with edges handle:'true'/'false' — still runs but is deprecated; author `branches`.)",
+      "Ordered `branches:[{id, label?, expression}]` — each expression is a JS boolean with page/context/$/logger/helpers/projectResources and runtime libraries (not code-block-only secrets/emit/state/files); the first true branch wins. Route one outgoing edge per branch with handle=<branch id>, plus exactly one catch-all edge with handle:'else' (label it via the node's `elseLabel`). Branch ids are stable routing keys — never 'else', never renamed when the label changes. (Legacy binary form — a single `expression` with edges handle:'true'/'false' — still runs but is deprecated; author `branches`.)",
     document: "Extract data from files via an extractor (extractorId + fileInputs). Find ids with list_extractors.",
     hitl: "Pause for a human: prompt + actions:[{id,label}]. Outgoing edges route by action id or 'timeout'.",
   },
@@ -449,13 +556,31 @@ const WorkflowPatchInput = z
     edges: z
       .object({
         add: z.array(z.record(z.string(), z.unknown())).optional(),
-        remove: z.array(z.record(z.string(), z.unknown())).optional(),
+        update: z
+          .array(
+            z.object({
+              from: z.string(),
+              to: z.string(),
+              handle: z.string().optional(),
+              patch: z.record(z.string(), z.unknown()),
+            }),
+          )
+          .optional(),
+        remove: z
+          .array(
+            z.object({
+              from: z.string(),
+              to: z.string(),
+              handle: z.string().optional(),
+            }),
+          )
+          .optional(),
       })
       .optional(),
   })
   .passthrough()
   .describe(
-    `Composite patch — send only what changes: { nodes:{add[],update[{name,patch}],remove[]}, edges:{add[],remove[]}, ...top-level } (settings deep-merges; others replace). Applied: nodes.remove → add → update → edges.remove → add → top-level. ${CODE_MODEL} ${CODE_EXAMPLE}`,
+    `Composite patch — send only what changes: { nodes:{add[],update[{name,patch}],remove[]}, edges:{add[],update[{from,to,handle?,patch}],remove[]}, ...top-level } (settings deep-merges; others replace). Edge remove/update identities include handle (omitted means an edge with no handle). Applied: nodes.remove → add → update → edges.remove → update → add → top-level. ${CODE_MODEL} ${CODE_EXAMPLE}`,
   );
 const limit = z.number().int().min(1).max(100).describe("Page size (default 25, max 100).").optional();
 const cursor = z.string().describe("Pagination cursor from a previous response's nextCursor.").optional();
@@ -488,7 +613,9 @@ const mapWorkflow = (w: any) => ({
   updatedAt: w.updatedAt,
 });
 
-// Resolve a secret/resource id by name (the v1 API addresses these by id).
+// Resolve resource ids through the exact-name list filter. A resource row is
+// uniquely identified by UUID; name-only compatibility lookups scan every
+// bounded page and succeed only when exactly one lifecycle row matches.
 // Studio secrets are Doppler-backed and NAME-keyed; every secrets call must
 // identify the Doppler project slug + config name. Tool inputs override the
 // env defaults (STUDIO_DOPPLER_PROJECT / STUDIO_DOPPLER_CONFIG).
@@ -504,9 +631,143 @@ function dopplerQuery(project?: string, config?: string): { project: string; con
 }
 const dopplerProjectInput = z.string().describe("Doppler project slug (defaults to STUDIO_DOPPLER_PROJECT).").optional();
 const dopplerConfigInput = z.string().describe("Doppler config name (defaults to STUDIO_DOPPLER_CONFIG).").optional();
+async function findResources(name: string, lifecycle?: string): Promise<any[]> {
+  const resources: any[] = [];
+  for (let page = 1; page <= FILTER_SCAN_MAX_PAGES; page++) {
+    const response = await api("GET", "/api/agent/resources", {
+      query: { name, lifecycle, page, pageSize: FILTER_SCAN_PAGE_SIZE },
+    });
+    resources.push(...(response.resources ?? []));
+    const totalPages = response.totalPages ?? page;
+    if (page >= totalPages) return resources;
+  }
+  throw new ApiError(
+    500,
+    "internal_error",
+    `Resource lookup for "${name}" exceeded the ${FILTER_SCAN_MAX_PAGES * FILTER_SCAN_PAGE_SIZE}-row safety bound.`,
+    [{ code: "scan_truncated", continuationPage: FILTER_SCAN_MAX_PAGES + 1 }],
+  );
+}
+
 async function findResource(name: string, lifecycle?: string): Promise<any | null> {
-  const r = await api("GET", "/api/agent/resources", { query: { name, lifecycle, pageSize: 1 } });
-  return r.resources?.[0] ?? null;
+  const resources = await findResources(name, lifecycle);
+  if (resources.length > 1) {
+    throw new ApiError(
+      409,
+      "conflict",
+      lifecycle
+        ? `Multiple resources matched name "${name}" and lifecycle "${lifecycle}"; use resourceId.`
+        : `Resource name "${name}" exists in multiple lifecycles; provide lifecycle or resourceId.`,
+    );
+  }
+  return resources[0] ?? null;
+}
+
+const ResourceIdentifierInput = z
+  .object({
+    resourceId: z.string().uuid().optional(),
+    name: z.string().min(1).optional(),
+    lifecycle: Lifecycle.optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.resourceId) return;
+    if (!value.name) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Provide resourceId or name." });
+    }
+  });
+
+const FILTER_SCAN_PAGE_SIZE = 500;
+const FILTER_SCAN_MAX_PAGES = 20;
+const SCHEDULE_RECONCILE_PAGE_SIZE = 200;
+const SCHEDULE_RECONCILE_MAX_PAGES = 20;
+type FilterCursor = { page: number; index: number };
+
+function decodeFilterCursor(value?: string): FilterCursor {
+  if (!value || /^\d+$/.test(value)) return { page: toPage(value), index: 0 };
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<FilterCursor>;
+    if (
+      Number.isInteger(parsed.page) &&
+      Number.isInteger(parsed.index) &&
+      (parsed.page ?? 0) > 0 &&
+      (parsed.index ?? -1) >= 0
+    ) {
+      return { page: parsed.page as number, index: parsed.index as number };
+    }
+  } catch {
+    // Characterized below as a normal tool failure.
+  }
+  throw new ApiError(400, "bad_request", "Invalid pagination cursor.");
+}
+
+const encodeFilterCursor = (value: FilterCursor) =>
+  Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+
+const mapResource = (resource: any) => ({
+  resourceId: resource.id,
+  name: resource.name,
+  description: resource.description ?? null,
+  value: resource.value,
+  lifecycle: resource.lifecycle ?? null,
+  updatedAt: resource.updatedAt,
+});
+
+async function findScheduleForReconciliation(workflowId: string, scheduleId: string): Promise<any | null> {
+  for (let page = 1; page <= SCHEDULE_RECONCILE_MAX_PAGES; page++) {
+    const response = await api("GET", `/api/agent/workflows/${workflowId}/schedules`, {
+      query: { page, pageSize: SCHEDULE_RECONCILE_PAGE_SIZE },
+    });
+    const schedule = (response.schedules ?? []).find((candidate: any) => candidate.id === scheduleId);
+    if (schedule) return schedule;
+    if (page >= (response.totalPages ?? page)) return null;
+  }
+  return null;
+}
+
+async function listFilteredResources(args: {
+  search: string;
+  lifecycle?: string;
+  limit: number;
+  cursor?: string;
+}) {
+  let { page, index } = decodeFilterCursor(args.cursor);
+  const items: any[] = [];
+  const query = args.search.toLowerCase();
+
+  for (let scanned = 0; scanned < FILTER_SCAN_MAX_PAGES; scanned++) {
+    const response = await api("GET", "/api/agent/resources", {
+      query: { lifecycle: args.lifecycle, page, pageSize: FILTER_SCAN_PAGE_SIZE },
+    });
+    const resources = response.resources ?? [];
+    const totalPages = response.totalPages ?? page;
+
+    for (let currentIndex = index; currentIndex < resources.length; currentIndex++) {
+      const resource = resources[currentIndex];
+      if (!(resource.name ?? "").toLowerCase().includes(query)) continue;
+      items.push(resource);
+      if (items.length === args.limit) {
+        const hasMoreOnPage = currentIndex + 1 < resources.length;
+        const next =
+          hasMoreOnPage || page < totalPages
+            ? encodeFilterCursor({
+                page: hasMoreOnPage ? page : page + 1,
+                index: hasMoreOnPage ? currentIndex + 1 : 0,
+              })
+            : null;
+        return { items, nextCursor: next, truncated: false };
+      }
+    }
+
+    if (page >= totalPages) return { items, nextCursor: null, truncated: false };
+    page += 1;
+    index = 0;
+  }
+
+  return {
+    items,
+    nextCursor: encodeFilterCursor({ page, index }),
+    truncated: true,
+  };
 }
 
 const MIN_DEFINITION = (name: string) => ({
@@ -551,7 +812,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Set project",
         description:
-          "Sets the target Studio project for every subsequent tool call (a PAT spans all your projects, so one must be selected). Validates access with a lightweight probe before storing. Call this FIRST if tools error with 'Missing project id', and to switch projects mid-session. The selection is remembered server-side best-effort — if it is ever forgotten (cold start), calls error with 'Missing project id' again: just re-run set_project. Returns: { projectId, validated: true }.",
+          "Sets the target Studio project for subsequent calls from this logical connector. Configure connection_id / x-connection-id when multiple connectors share one PAT; mcp-session-id is used automatically when present. An explicit project_id query or x-project-id header remains pinned and takes precedence. Validates access before storing. Returns: { projectId, validated: true }.",
         inputSchema: {
           projectId: z.string().uuid().describe("The Studio project UUID — discover it with list_projects."),
         },
@@ -560,21 +821,39 @@ const baseHandler = createMcpHandler(
       async ({ projectId }) => {
         try {
           const bucket = tokenBucket();
-          if (!bucket) throw new ApiError(401, "unauthorized", "Missing API key.");
+          if (!bucket) {
+            throw new ApiError(
+              400,
+              "bad_request",
+              "set_project needs a logical connector identity. Add connection_id=<stable-id> to the MCP URL or send x-connection-id; clients with mcp-session-id need no extra configuration.",
+            );
+          }
           // Validate against the DISCOVERY listing (an all-projects token gets
           // an empty-but-200 workflows list even for a nonexistent project id,
           // so probing a project-scoped route can't tell a typo from an empty
           // project). Walk the pages until the id shows up.
+          const maxValidationPages = 100;
           let found = false;
-          for (let page = 1; page <= 20 && !found; page++) {
+          let totalPages = 1;
+          for (let page = 1; page <= maxValidationPages && !found; page++) {
             const r = await api("GET", "/api/agent/projects", { query: { page, pageSize: 100 } });
             found = (r.projects ?? []).some((p: any) => p.id === projectId);
-            if (page >= (r.totalPages ?? 1)) break;
+            totalPages = r.totalPages ?? 1;
+            if (page >= totalPages) break;
+          }
+          if (!found && totalPages > maxValidationPages) {
+            return toolFailure(
+              500,
+              "Project validation reached its 10,000-project safety bound before finding the requested id. Pin project_id on the connection or narrow the PAT project allowlist.",
+              "internal_error",
+              { truncated: true, continuationPage: maxValidationPages + 1 },
+            );
           }
           if (!found) {
-            return result({
-              error: { code: "not_found", message: `Project ${projectId} is not accessible to this token — call list_projects to see the available projects.` },
-            });
+            return toolFailure(
+              404,
+              `Project ${projectId} is not accessible to this token — call list_projects to see the available projects.`,
+            );
           }
           await rememberProject(projectId);
           return result({ projectId, validated: true });
@@ -648,13 +927,10 @@ const baseHandler = createMcpHandler(
       async ({ status, search, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", "/api/agent/workflows", { query: { page, pageSize: lim ?? 25 } });
-          let items = (r.workflows ?? []).map(mapWorkflow);
-          if (status) items = items.filter((w: any) => w.status === status);
-          if (search) {
-            const q = search.toLowerCase();
-            items = items.filter((w: any) => (w.name ?? "").toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q));
-          }
+          const r = await api("GET", "/api/agent/workflows", {
+            query: { status, search, page, pageSize: lim ?? 25 },
+          });
+          const items = (r.workflows ?? []).map(mapWorkflow);
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
           return fail(e);
@@ -676,10 +952,14 @@ const baseHandler = createMcpHandler(
         },
         annotations: CREATE,
       },
-      async ({ name, definition }) => {
+      async ({ name, description, definition }) => {
         try {
-          const def = definition ?? MIN_DEFINITION(name);
-          const r = await api("POST", "/api/agent/workflows", { body: { definition: def, name } });
+          const def = {
+            ...(definition ?? MIN_DEFINITION(name)),
+            name,
+            ...(description !== undefined ? { description } : {}),
+          };
+          const r = await api("POST", "/api/agent/workflows", { body: { definition: def } });
           return result({
             workflowId: r.workflow?.id,
             versionId: r.version?.id,
@@ -705,10 +985,10 @@ const baseHandler = createMcpHandler(
         try {
           const src = await api("GET", `/api/agent/workflows/${workflowId}`);
           const def = src.workflow?.definition;
-          if (!def) return result({ error: { code: "not_found", message: "Source workflow has no active version to copy." } });
+          if (!def) return toolFailure(404, "Source workflow has no active version to copy.");
           const newName = name ?? `Copy of ${src.workflow?.name ?? "workflow"}`;
           const created = { ...def, name: newName };
-          const r = await api("POST", "/api/agent/workflows", { body: { definition: created, name: newName } });
+          const r = await api("POST", "/api/agent/workflows", { body: { definition: created } });
           return result({ workflowId: r.workflow?.id, name: r.workflow?.name ?? newName });
         } catch (e) {
           return fail(e);
@@ -732,7 +1012,7 @@ const baseHandler = createMcpHandler(
       async ({ workflowId, view, nodeName }) => {
         try {
           if (view === "node" && !nodeName) {
-            return result({ error: { code: "bad_request", message: "nodeName is required when view='node'." } });
+            return toolFailure(400, "nodeName is required when view='node'.");
           }
           // Definition JSON (view full/node) is AUTHORSHIP-tier on the studio
           // API. full/node pass the view through and surface the server's 403
@@ -747,7 +1027,7 @@ const baseHandler = createMcpHandler(
             if (view === "graph" && e instanceof ApiError && e.status === 403) {
               const lean = await api("GET", `/api/agent/workflows/${workflowId}`, { query: { view: "graph" } });
               const lw = lean.workflow;
-              if (!lw) return result({ error: { code: "not_found", message: "Workflow not found." } });
+              if (!lw) return toolFailure(404, "Workflow not found.");
               return result({
                 _meta: metaOf(lw),
                 ...(lw.graph ?? {}),
@@ -757,7 +1037,7 @@ const baseHandler = createMcpHandler(
             throw e;
           }
           const w = r.workflow;
-          if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
+          if (!w) return toolFailure(404, "Workflow not found.");
           const meta = metaOf(w);
           if (view === "node") {
             // Server-resolved: a missing node 404s at the API and surfaces via fail().
@@ -819,7 +1099,7 @@ const baseHandler = createMcpHandler(
         if (apiEnabled !== undefined) body.apiEnabled = apiEnabled;
         if (apiUrlSlug !== undefined) body.apiUrlSlug = apiUrlSlug;
         if (Object.keys(body).length === 0)
-          return result({ error: { code: "bad_request", message: "Provide at least one field to update." } });
+          return toolFailure(400, "Provide at least one field to update.");
         try {
           const r = await api("PATCH", `/api/agent/workflows/${workflowId}`, { body });
           return result(mapWorkflow(r.workflow));
@@ -853,7 +1133,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Edit workflow",
         description:
-          "Applies a composite patch to a workflow's graph and saves a new version. Read the graph first, then send only what changes in `patch`. Best for STRUCTURAL edits (add/remove/rename nodes, rewire edges, settings) — to change part of an existing node's code, prefer edit_node_code (find/replace; no need to resend the whole code string; a nodes.update patch REPLACES each field wholesale). Validated server-side; on success a new version, on failure an error. Pass expectedActiveVersionId (from read_workflow's _meta) to avoid clobbering concurrent edits. Returns: { ok, versionId, versionNumber, deduped } or { error }.",
+          "Applies a composite patch to a workflow's graph and saves a new version. Read the graph first, then send only what changes in `patch`. Best for STRUCTURAL edits (add/remove/rename nodes, rewire edges, settings) — edge remove/update identities include from, to, and handle (omitted handle matches only an unhandled edge). To change part of an existing node's code, prefer edit_node_code (find/replace; no need to resend the whole code string; a nodes.update patch REPLACES each field wholesale). Validated server-side; on success a new version, on failure an error. Pass expectedActiveVersionId (from read_workflow's _meta) to avoid clobbering concurrent edits. Returns: { ok, versionId, versionNumber, deduped } or { error }.",
         inputSchema: {
           workflowId: z.string(),
           patch: WorkflowPatchInput,
@@ -865,14 +1145,18 @@ const baseHandler = createMcpHandler(
         try {
           const cur = await api("GET", `/api/agent/workflows/${workflowId}`);
           const w = cur.workflow;
-          if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
+          if (!w) return toolFailure(404, "Workflow not found.");
           const current = w.definition;
-          if (!current) return result({ error: { code: "bad_request", message: "Workflow has no version to edit. Create one first." } });
+          if (!current) return toolFailure(400, "Workflow has no version to edit. Create one first.");
           let next: any;
           try {
             next = applyWorkflowPatch(current, patch);
           } catch (patchErr) {
-            return result({ error: { code: "validation_failed", message: patchErr instanceof Error ? patchErr.message : String(patchErr) } });
+            return toolFailure(
+              422,
+              patchErr instanceof Error ? patchErr.message : "The workflow patch is invalid.",
+              "validation_failed",
+            );
           }
           const r = await api("PUT", `/api/agent/workflows/${workflowId}`, {
             body: { definition: next, name: next.name, expectedActiveVersionId: expectedActiveVersionId ?? w.activeVersionId },
@@ -907,17 +1191,17 @@ const baseHandler = createMcpHandler(
       async ({ workflowId, nodeName, oldString, newString, field, replaceAll, expectedActiveVersionId }) => {
         try {
           if (oldString === newString)
-            return result({ error: { code: "bad_request", message: "oldString and newString are identical — nothing to change." } });
+            return toolFailure(400, "oldString and newString are identical — nothing to change.");
           const cur = await api("GET", `/api/agent/workflows/${workflowId}`);
           const w = cur.workflow;
-          if (!w) return result({ error: { code: "not_found", message: "Workflow not found." } });
+          if (!w) return toolFailure(404, "Workflow not found.");
           const current = w.definition;
-          if (!current) return result({ error: { code: "bad_request", message: "Workflow has no version to edit. Create one first." } });
+          if (!current) return toolFailure(400, "Workflow has no version to edit. Create one first.");
           const next = JSON.parse(JSON.stringify(current));
           const node = (next.nodes ?? []).find((n: any) => n.name === nodeName);
           if (!node) {
             const known = (next.nodes ?? []).map((n: any) => n.name).join(", ");
-            return result({ error: { code: "not_found", message: `No node named "${nodeName}". Nodes: ${known}` } });
+            return toolFailure(404, `No node named "${nodeName}". Nodes: ${known}`);
           }
           const f = field ?? "code";
           // Each target is one string-valued slot the search runs over. 'expression'
@@ -934,23 +1218,19 @@ const baseHandler = createMcpHandler(
           }
           const present = targets.filter((t) => typeof t.get() === "string");
           if (!present.length)
-            return result({ error: { code: "bad_request", message: `Node "${nodeName}" (type ${node.type}) has no ${f} to edit.` } });
+            return toolFailure(400, `Node "${nodeName}" (type ${node.type}) has no ${f} to edit.`);
           const counts = present.map((t) => (t.get() as string).split(oldString).length - 1);
           const total = counts.reduce((a, b) => a + b, 0);
           if (total === 0)
-            return result({
-              error: {
-                code: "not_found",
-                message: `oldString not found in ${f} of node "${nodeName}" (${present.map((t) => `${t.where}: ${(t.get() as string).length} chars`).join(", ")}). Read the current text with read_workflow view:'node' and match it exactly, including whitespace.`,
-              },
-            });
+            return toolFailure(
+              404,
+              `oldString not found in ${f} of node "${nodeName}" (${present.map((t) => `${t.where}: ${(t.get() as string).length} chars`).join(", ")}). Read the current text with read_workflow view:'node' and match it exactly, including whitespace.`,
+            );
           if (total > 1 && !replaceAll)
-            return result({
-              error: {
-                code: "conflict",
-                message: `oldString occurs ${total} times in ${f} of node "${nodeName}". Add surrounding context to make it unique, or pass replaceAll:true.`,
-              },
-            });
+            return toolFailure(
+              409,
+              `oldString occurs ${total} times in ${f} of node "${nodeName}". Add surrounding context to make it unique, or pass replaceAll:true.`,
+            );
           present.forEach((t, i) => {
             if (counts[i] > 0) t.set((t.get() as string).split(oldString).join(newString));
           });
@@ -1007,7 +1287,7 @@ const baseHandler = createMcpHandler(
         try {
           const r = await api("GET", `/api/agent/workflows/${workflowId}/versions/${versionId}`);
           const v = r.version;
-          if (!v) return result({ error: { code: "not_found", message: "Version not found." } });
+          if (!v) return toolFailure(404, "Version not found.");
           return result({ versionId: v.id, versionNumber: v.versionNumber, name: v.name ?? null, source: v.source ?? null, createdAt: v.createdAt, definition: v.definition });
         } catch (e) {
           return fail(e);
@@ -1070,7 +1350,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Create schedule",
         description:
-          "Creates a recurring schedule using an RFC 5545 recurrence rule (e.g. 'FREQ=DAILY;BYHOUR=9'). All schedules run in UTC — express times in UTC. Run input comes from a linked project resource (inputResourceName). Set enabled:false to create it paused. Returns: { scheduleId }.",
+          "Creates a recurring schedule using an RFC 5545 recurrence rule (e.g. 'FREQ=DAILY;BYHOUR=9'). All schedules run in UTC — express times in UTC. Run input comes from a linked project resource (inputResourceName). Set enabled:false to create it paused. A failed pause is reconciled; unknown outcomes return an explicit partialResult. Returns: { scheduleId }.",
         inputSchema: {
           workflowId: z.string(),
           recurrenceRule: z.string().describe("RFC 5545 RRULE, evaluated in UTC."),
@@ -1095,7 +1375,36 @@ const baseHandler = createMcpHandler(
           // ignores a client status, so honor enabled:false with a follow-up pause
           // (ergonomics compose in the MCP, not the CRUD route).
           if (scheduleId && enabled === false && r.schedule?.status !== "paused") {
-            await api("PATCH", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`, { body: { status: "paused" } });
+            try {
+              await api("PATCH", `/api/agent/workflows/${workflowId}/schedules/${scheduleId}`, {
+                body: { status: "paused" },
+              });
+            } catch (e) {
+              try {
+                const current = await findScheduleForReconciliation(workflowId, scheduleId);
+                if (current?.status === "paused") {
+                  return result({ scheduleId, status: "paused", reconciled: true });
+                }
+                if (current) {
+                  return fail(e, {
+                    scheduleId,
+                    created: true,
+                    previousStatus: r.schedule?.status ?? null,
+                    pauseOutcome: "not_applied",
+                    currentStatus: current.status ?? null,
+                  });
+                }
+              } catch {
+                // Preserve the original pause failure; reconciliation is best effort.
+              }
+              return fail(e, {
+                scheduleId,
+                created: true,
+                previousStatus: r.schedule?.status ?? null,
+                pauseOutcome: "unknown",
+                requestedStatus: "paused",
+              });
+            }
           }
           return result({ scheduleId });
         } catch (e) {
@@ -1204,13 +1513,14 @@ const baseHandler = createMcpHandler(
       async ({ workflowId, status, limit: lim, cursor: cur }) => {
         try {
           const page = toPage(cur);
-          const r = await api("GET", "/api/agent/sessions", { query: { workflowId, page, pageSize: lim ?? 25 } });
-          let items = (r.sessions ?? []).map((s: any) => ({
+          const r = await api("GET", "/api/agent/sessions", {
+            query: { workflowId, status, page, pageSize: lim ?? 25 },
+          });
+          const items = (r.sessions ?? []).map((s: any) => ({
             sessionId: s.id, workflowId: s.workflowId, status: s.status, source: s.source ?? null,
             startedAt: s.startedAt ?? null, endedAt: s.endedAt ?? null,
             durationMs: durMs(s.startedAt, s.endedAt),
           }));
-          if (status) items = items.filter((s: any) => s.status === status);
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
           return fail(e);
@@ -1236,7 +1546,7 @@ const baseHandler = createMcpHandler(
           const inc = new Set(include ?? []);
           const r = await api("GET", `/api/agent/sessions/${sessionId}`);
           const s = r.session;
-          if (!s) return result({ error: { code: "not_found", message: "Run not found." } });
+          if (!s) return toolFailure(404, "Run not found.");
           const out: Record<string, unknown> = {
             sessionId: s.id, workflowId: s.workflowId, versionId: s.workflowVersionId ?? null,
             status: s.status, source: s.source ?? null, input: s.inputData ?? null, output: s.outputData ?? null,
@@ -1297,13 +1607,18 @@ const baseHandler = createMcpHandler(
       },
     );
 
-    // ---- HITL (not in v1 API yet) ----
+    // ---- HITL ----
     server.registerTool(
       "list_hitl_tasks",
       {
         title: "List human-in-the-loop tasks",
         description: "Lists human-in-the-loop tasks (approvals/inputs that pause a run).",
-        inputSchema: { sessionId: z.string().optional(), status: z.enum(["pending", "completed", "expired"]).optional(), limit, cursor },
+        inputSchema: {
+          sessionId: z.string().uuid().optional(),
+          status: z.enum(["pending", "responded", "expired", "canceled"]).optional(),
+          limit,
+          cursor,
+        },
         annotations: RO,
       },
       async ({ sessionId, status, limit: lim, cursor: cur }) => {
@@ -1312,8 +1627,9 @@ const baseHandler = createMcpHandler(
           const r = await api("GET", "/api/agent/hitl/tasks", { query: { sessionId, status, page, pageSize: lim ?? 25 } });
           const items = (r.tasks ?? []).map((t: any) => ({
             taskId: t.id, sessionId: t.sessionId, workflowId: t.workflowId, nodeName: t.nodeName,
-            prompt: t.prompt, actions: t.actions, isApproval: t.isApproval, fields: t.fields,
+            prompt: t.prompt, isApproval: t.isApproval, selectedAction: t.selectedAction,
             status: t.status, createdAt: t.createdAt, expiresAt: t.expiresAt,
+            respondedAt: t.respondedAt, respondedByName: t.respondedByName,
           }));
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
@@ -1327,13 +1643,20 @@ const baseHandler = createMcpHandler(
       {
         title: "Complete human-in-the-loop task",
         description: "Submits a human decision to resume a paused run.",
-        inputSchema: { taskId: z.string(), action: z.string(), fields: z.record(z.string(), z.unknown()).optional() },
+        inputSchema: {
+          taskId: z.string().uuid(),
+          action: z.string().min(1),
+          fields: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+          secretKey: z.string().optional(),
+        },
         annotations: CREATE,
       },
-      async ({ taskId, action, fields }) => {
+      async ({ taskId, action, fields, secretKey }) => {
         try {
-          const r = await api("POST", `/api/agent/hitl/tasks/${taskId}/complete`, { body: { action, fields } });
-          return result({ success: r.success ?? true });
+          const r = await api("POST", `/api/agent/hitl/tasks/${taskId}/complete`, {
+            body: { action, fields, secretKey },
+          });
+          return result({ success: r.success === true });
         } catch (e) {
           return fail(e);
         }
@@ -1365,7 +1688,8 @@ const baseHandler = createMcpHandler(
       "set_secrets",
       {
         title: "Set secrets",
-        description: "Creates or updates one or more project secrets (upsert by key). Values are write-only. Returns: { updated: [keys] }.",
+        description:
+          "Creates or updates one or more project secrets (upsert by key). Values are write-only. A failed current write reports attemptedKey + outcome:'unknown'; updated contains only prior acknowledgements. Returns: { updated: [keys] }.",
         inputSchema: {
           secrets: z.array(z.object({ key: z.string(), value: z.string() })).min(1),
           dopplerProject: dopplerProjectInput,
@@ -1374,12 +1698,24 @@ const baseHandler = createMcpHandler(
         annotations: UPSERT,
       },
       async ({ secrets, dopplerProject, dopplerConfig }) => {
+        const updated: string[] = [];
         try {
           const query = dopplerQuery(dopplerProject, dopplerConfig);
-          const updated: string[] = [];
-          for (const s of secrets) {
+          for (const [index, s] of secrets.entries()) {
             // Name-keyed upsert — PUT creates or updates; the value is write-only.
-            await api("PUT", `/api/agent/secrets/${encodeURIComponent(s.key)}`, { query, body: { value: s.value } });
+            try {
+              await api("PUT", `/api/agent/secrets/${encodeURIComponent(s.key)}`, {
+                query,
+                body: { value: s.value },
+              });
+            } catch (e) {
+              return fail(e, {
+                updated,
+                attemptedKey: s.key,
+                outcome: "unknown",
+                remainingKeys: secrets.slice(index + 1).map((entry) => entry.key),
+              });
+            }
             updated.push(s.key);
           }
           return result({ updated });
@@ -1412,16 +1748,43 @@ const baseHandler = createMcpHandler(
       "list_resources",
       {
         title: "List resources",
-        description: "Lists project data resources by name and metadata. Returns: { items: [{ name, kind, description, lifecycle, updatedAt }], nextCursor }.",
+        description:
+          "Lists project data resources by stable resourceId, name, and metadata. Search uses bounded complete-page scanning and reports truncation. Returns: { items: [{ resourceId, name, kind, description, lifecycle, updatedAt }], nextCursor, truncated? }.",
         inputSchema: { lifecycle: Lifecycle.optional(), search: z.string().optional(), limit, cursor },
         annotations: RO,
       },
       async ({ lifecycle, search, limit: lim, cursor: cur }) => {
         try {
+          if (search) {
+            const filtered = await listFilteredResources({
+              search,
+              lifecycle,
+              limit: lim ?? 25,
+              cursor: cur,
+            });
+            return result({
+              items: filtered.items.map((x: any) => ({
+                resourceId: x.id,
+                name: x.name,
+                kind: "data",
+                description: x.description ?? null,
+                lifecycle: x.lifecycle ?? null,
+                updatedAt: x.updatedAt,
+              })),
+              nextCursor: filtered.nextCursor,
+              truncated: filtered.truncated,
+            });
+          }
           const page = toPage(cur);
           const r = await api("GET", "/api/agent/resources", { query: { lifecycle, page, pageSize: lim ?? 25 } });
-          let items = (r.resources ?? []).map((x: any) => ({ name: x.name, kind: "data", description: x.description ?? null, lifecycle: x.lifecycle ?? null, updatedAt: x.updatedAt }));
-          if (search) { const q = search.toLowerCase(); items = items.filter((x: any) => (x.name ?? "").toLowerCase().includes(q)); }
+          const items = (r.resources ?? []).map((x: any) => ({
+            resourceId: x.id,
+            name: x.name,
+            kind: "data",
+            description: x.description ?? null,
+            lifecycle: x.lifecycle ?? null,
+            updatedAt: x.updatedAt,
+          }));
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
           return fail(e);
@@ -1433,15 +1796,28 @@ const baseHandler = createMcpHandler(
       "get_resource",
       {
         title: "Get resource",
-        description: "Returns a project data resource by name (includes its value).",
-        inputSchema: { name: z.string(), lifecycle: Lifecycle.optional() },
+        description:
+          "Returns one project data resource by canonical resourceId or name. lifecycle disambiguates names that exist in multiple stages; an ambiguous name-only lookup returns conflict.",
+        inputSchema: ResourceIdentifierInput,
         annotations: RO,
       },
-      async ({ name, lifecycle }) => {
+      async ({ resourceId, name, lifecycle }) => {
         try {
-          const x = await findResource(name, lifecycle);
-          if (!x) return result({ error: { code: "not_found", message: `No resource named "${name}".` } });
-          return result({ name: x.name, kind: "data", value: x.value, description: x.description ?? null, lifecycle: x.lifecycle ?? null, updatedAt: x.updatedAt });
+          if (!resourceId && !name) return toolFailure(400, "Provide resourceId or name.");
+          const response = resourceId
+            ? await api("GET", `/api/agent/resources/${resourceId}`)
+            : { resource: await findResource(name as string, lifecycle) };
+          const x = response.resource;
+          if (!x) {
+            return toolFailure(
+              404,
+              `No resource matched ${resourceId ?? (lifecycle ? `${name}/${lifecycle}` : name)}.`,
+            );
+          }
+          return result({
+            ...mapResource(x),
+            kind: "data",
+          });
         } catch (e) {
           return fail(e);
         }
@@ -1452,16 +1828,53 @@ const baseHandler = createMcpHandler(
       "set_resource",
       {
         title: "Set resource",
-        description: "Creates or updates a data (JSON) resource by name (upsert). Omitting lifecycle on create seeds all stages. Returns: { name }.",
-        inputSchema: { name: z.string(), value: z.unknown(), description: z.string().optional(), lifecycle: Lifecycle.optional() },
+        description:
+          "Creates or updates data resources. resourceId updates one row; name + lifecycle upserts one stage. Name-only updates a unique existing row, conflicts on multiple lifecycle rows, or creates all stages when absent. Every returned row normalizes Studio id to resourceId.",
+        inputSchema: {
+          resourceId: z.string().uuid().optional(),
+          name: z.string().min(1).optional(),
+          value: z.unknown(),
+          description: z.string().optional(),
+          lifecycle: Lifecycle.optional(),
+        },
         annotations: UPSERT,
       },
-      async ({ name, value, description, lifecycle }) => {
+      async ({ resourceId, name, value, description, lifecycle }) => {
         try {
-          const existing = await findResource(name, lifecycle);
-          if (existing) await api("PUT", `/api/agent/resources/${existing.id}`, { body: { value, description } });
-          else await api("POST", "/api/agent/resources", { body: { name, value, description, lifecycle } });
-          return result({ name });
+          if (resourceId) {
+            const updated = await api("PUT", `/api/agent/resources/${resourceId}`, {
+              body: { value, description },
+            });
+            return result({ resource: mapResource(updated.resource) });
+          }
+          if (!name) return toolFailure(400, "Provide resourceId or name.");
+          if (lifecycle) {
+            const existing = await findResource(name, lifecycle);
+            if (existing) {
+              const updated = await api("PUT", `/api/agent/resources/${existing.id}`, {
+                body: { value, description },
+              });
+              return result({ resource: mapResource(updated.resource) });
+            }
+          } else {
+            const existing = await findResources(name);
+            if (existing.length > 1) {
+              return toolFailure(
+                409,
+                `Resource name "${name}" exists in multiple lifecycles; provide lifecycle or resourceId.`,
+              );
+            }
+            if (existing.length === 1) {
+              const updated = await api("PUT", `/api/agent/resources/${existing[0].id}`, {
+                body: { value, description },
+              });
+              return result({ resource: mapResource(updated.resource) });
+            }
+          }
+          const created = await api("POST", "/api/agent/resources", {
+            body: { name, value, description, lifecycle },
+          });
+          return result({ resources: (created.resources ?? []).map(mapResource) });
         } catch (e) {
           return fail(e);
         }
@@ -1472,16 +1885,20 @@ const baseHandler = createMcpHandler(
       "delete_resource",
       {
         title: "Delete resource",
-        description: "Deletes a project data resource by name. Returns: { success: true }.",
-        inputSchema: { name: z.string(), lifecycle: Lifecycle.optional() },
+        description:
+          "Deletes one project data resource by canonical resourceId or name. lifecycle disambiguates names that exist in multiple stages; an ambiguous name-only lookup returns conflict.",
+        inputSchema: ResourceIdentifierInput,
         annotations: REMOVE,
       },
-      async ({ name, lifecycle }) => {
+      async ({ resourceId, name, lifecycle }) => {
         try {
-          const x = await findResource(name, lifecycle);
-          if (!x) return result({ error: { code: "not_found", message: `No resource named "${name}".` } });
-          await api("DELETE", `/api/agent/resources/${x.id}`);
-          return result({ success: true, name });
+          if (!resourceId && !name) return toolFailure(400, "Provide resourceId or name.");
+          const targetId = resourceId ?? (await findResource(name as string, lifecycle))?.id;
+          if (!targetId) {
+            return toolFailure(404, `No resource matched ${lifecycle ? `${name}/${lifecycle}` : name}.`);
+          }
+          await api("DELETE", `/api/agent/resources/${targetId}`);
+          return result({ success: true, resourceId: targetId });
         } catch (e) {
           return fail(e);
         }
@@ -1532,7 +1949,7 @@ const baseHandler = createMcpHandler(
   {
     serverInfo: { name: "automat-robotic-workflows", version: packageJson.version },
     instructions:
-      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: list_projects to discover ids, then set_project (re-call it if a tool errors with 'Missing project id') — or pin one on the connection via ?project_id=<uuid> / x-project-id / STUDIO_DEFAULT_PROJECT_ID. Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
+      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: list_projects to discover ids, then set_project (requires connection_id / x-connection-id unless the client sends mcp-session-id) — or pin one on the connection via ?project_id=<uuid> / x-project-id / STUDIO_DEFAULT_PROJECT_ID. Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
       "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit: edit_node_code for surgical find/replace inside one node's code (preferred for code changes — no resending big strings), edit_workflow with a small patch for structural changes (both validate and save a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
       "Lifecycle policy (REQUIRED): development while the agent iterates (default for new workflows; use dryRun:true only when the workflow explicitly implements that convention, because the platform does not suppress arbitrary side effects) → preview ONLY when ready for the human to test → active ONLY after explicit user go-live approval. Never skip to active on your own. get_docs topic:'lifecycle' has the full ladder.\n\n" +
       "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",
@@ -1552,9 +1969,24 @@ const authed = async (req: Request): Promise<Response> => {
     });
   }
   const projectId = extractProjectId(req);
-  const response = await callerKey.run(key, () =>
-    projectId ? callerProject.run(projectId, () => baseHandler(req)) : baseHandler(req)
-  );
+  const connectionId = extractConnectionId(req);
+  let response: Response;
+  try {
+    response = await callerKey.run(key, () =>
+      connectionId
+        ? callerConnection.run(connectionId, () =>
+            projectId ? callerProject.run(projectId, () => baseHandler(req)) : baseHandler(req),
+          )
+        : projectId
+          ? callerProject.run(projectId, () => baseHandler(req))
+          : baseHandler(req),
+    );
+  } catch {
+    response = new Response(JSON.stringify({ error: "internal_error", message: "MCP request failed" }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+  }
   for (const [name, value] of Object.entries(corsHeaders)) {
     response.headers.set(name, value);
   }

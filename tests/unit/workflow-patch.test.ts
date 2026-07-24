@@ -58,4 +58,62 @@ describe("applyWorkflowPatch", () => {
       /unknown endpoint/,
     );
   });
+
+  it("removes only the edge whose endpoints and handle all match", () => {
+    const parallel = {
+      ...workflow,
+      edges: [
+        { from: "Fetch", to: "End", handle: "approved" },
+        { from: "Fetch", to: "End", handle: "rejected" },
+        { from: "Fetch", to: "End" },
+      ],
+    };
+
+    expect(
+      applyWorkflowPatch(parallel, {
+        edges: { remove: [{ from: "Fetch", to: "End", handle: "approved" }] },
+      }).edges,
+    ).toEqual([
+      { from: "Fetch", to: "End", handle: "rejected" },
+      { from: "Fetch", to: "End" },
+    ]);
+
+    expect(
+      applyWorkflowPatch(parallel, {
+        edges: { remove: [{ from: "Fetch", to: "End" }] },
+      }).edges,
+    ).toEqual([
+      { from: "Fetch", to: "End", handle: "approved" },
+      { from: "Fetch", to: "End", handle: "rejected" },
+    ]);
+  });
+
+  it("updates only the edge whose endpoints and handle all match", () => {
+    const parallel = {
+      ...workflow,
+      nodes: [...workflow.nodes, { type: "end", name: "Rejected" }],
+      edges: [
+        { from: "Fetch", to: "End", handle: "approved" },
+        { from: "Fetch", to: "End", handle: "rejected" },
+      ],
+    };
+
+    expect(
+      applyWorkflowPatch(parallel, {
+        edges: {
+          update: [
+            {
+              from: "Fetch",
+              to: "End",
+              handle: "rejected",
+              patch: { to: "Rejected" },
+            },
+          ],
+        },
+      }).edges,
+    ).toEqual([
+      { from: "Fetch", to: "End", handle: "approved" },
+      { from: "Fetch", to: "Rejected", handle: "rejected" },
+    ]);
+  });
 });

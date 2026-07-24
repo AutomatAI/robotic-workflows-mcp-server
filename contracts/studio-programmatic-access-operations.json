@@ -1,0 +1,191 @@
+{
+  "contractId": "automat-studio-programmatic-access",
+  "revision": 1,
+  "operations": [
+    {
+      "operationId": "extractors.create",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/extractors"
+    },
+    {
+      "operationId": "extractors.delete",
+      "method": "DELETE",
+      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}"
+    },
+    {
+      "operationId": "extractors.get",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}"
+    },
+    {
+      "operationId": "extractors.list",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/extractors"
+    },
+    {
+      "operationId": "extractors.run",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}/run"
+    },
+    {
+      "operationId": "extractors.update",
+      "method": "PATCH",
+      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}"
+    },
+    {
+      "operationId": "hitl.complete_task",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/hitl/tasks/{taskId}/complete"
+    },
+    {
+      "operationId": "hitl.list_tasks",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/hitl/tasks"
+    },
+    {
+      "operationId": "projects.list",
+      "method": "GET",
+      "path": "/api/v1/projects"
+    },
+    {
+      "operationId": "resources.create",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/resources"
+    },
+    {
+      "operationId": "resources.delete",
+      "method": "DELETE",
+      "path": "/api/v1/projects/{projectId}/resources/{resourceId}"
+    },
+    {
+      "operationId": "resources.get",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/resources/{resourceId}"
+    },
+    {
+      "operationId": "resources.list",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/resources"
+    },
+    {
+      "operationId": "resources.put",
+      "method": "PUT",
+      "path": "/api/v1/projects/{projectId}/resources/{resourceId}"
+    },
+    {
+      "operationId": "schedules.create",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules"
+    },
+    {
+      "operationId": "schedules.delete",
+      "method": "DELETE",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules/{scheduleId}"
+    },
+    {
+      "operationId": "schedules.list",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules"
+    },
+    {
+      "operationId": "schedules.update",
+      "method": "PATCH",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules/{scheduleId}"
+    },
+    {
+      "operationId": "schema.get_workflow",
+      "method": "GET",
+      "path": "/api/v1/schema"
+    },
+    {
+      "operationId": "secrets.delete",
+      "method": "DELETE",
+      "path": "/api/v1/projects/{projectId}/secrets/{secretName}"
+    },
+    {
+      "operationId": "secrets.list_names",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/secrets"
+    },
+    {
+      "operationId": "secrets.put",
+      "method": "PUT",
+      "path": "/api/v1/projects/{projectId}/secrets/{secretName}"
+    },
+    {
+      "operationId": "sessions.get",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}"
+    },
+    {
+      "operationId": "sessions.get_logs",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/logs"
+    },
+    {
+      "operationId": "sessions.list",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/sessions"
+    },
+    {
+      "operationId": "sessions.list_nodes",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/nodes"
+    },
+    {
+      "operationId": "sessions.stop",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/stop"
+    },
+    {
+      "operationId": "versions.get",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions/{versionId}"
+    },
+    {
+      "operationId": "versions.list",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions"
+    },
+    {
+      "operationId": "versions.revert",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions/{versionId}/revert"
+    },
+    {
+      "operationId": "workflows.create",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/workflows"
+    },
+    {
+      "operationId": "workflows.delete",
+      "method": "DELETE",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}"
+    },
+    {
+      "operationId": "workflows.get",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}"
+    },
+    {
+      "operationId": "workflows.list",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/workflows"
+    },
+    {
+      "operationId": "workflows.put_definition",
+      "method": "PUT",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}"
+    },
+    {
+      "operationId": "workflows.run",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/run"
+    },
+    {
+      "operationId": "workflows.update",
+      "method": "PATCH",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}"
+    }
+  ]
+}
