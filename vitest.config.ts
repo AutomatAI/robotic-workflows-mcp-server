@@ -11,7 +11,8 @@ export default defineConfig({
       reportsDirectory: "coverage",
       // Ratchet-only floor: bump these up as real tests land (see
       // AGENTS.md / repository-harness.md). Never lower them, and never set
-      // them above currently-measured coverage — that's slack, not a gate.
+      // them above currently-measured coverage. Keep each floor just below
+      // the measured value so ordinary instrumentation variance has margin.
       thresholds: {
         lines: 43,
         statements: 40,

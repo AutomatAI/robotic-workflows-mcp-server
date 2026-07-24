@@ -1,13 +1,13 @@
 ---
-globs: ["package.json", "pnpm-lock.yaml", "tsconfig.json", "biome.json", "vitest.config.ts", ".node-version", ".github/**", ".cursor/**", ".claude/**", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
-paths: ["package.json", "pnpm-lock.yaml", "tsconfig.json", "biome.json", "vitest.config.ts", ".node-version", ".github/**", ".cursor/**", ".claude/**", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
+globs: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "scripts/check-exact-dependencies.mjs", "tsconfig.json", "biome.json", "vitest.config.ts", ".node-version", ".github/**", ".cursor/**", ".claude/**", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
+paths: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "scripts/check-exact-dependencies.mjs", "tsconfig.json", "biome.json", "vitest.config.ts", ".node-version", ".github/**", ".cursor/**", ".claude/**", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
 alwaysApply: false
 ---
 
 # Repository harness
 
 - Keep pnpm and commit `pnpm-lock.yaml`.
-- Pin every `package.json` dependency and devDependency to an exact version (no `^`/`~`/`>=`) — `.npmrc` sets `save-exact=true` so `pnpm add` does this by default. A version bump is a reviewable diff, not silent drift on `pnpm install`.
+- Pin every `package.json` dependency and devDependency to an exact version (no `^`/`~`/`>=`) — `pnpm-workspace.yaml` sets `saveExact: true` so `pnpm add` does this by default, and `pnpm run check:dependencies` enforces it. A version bump is a reviewable diff, not silent drift on `pnpm install`.
 - Never float `mcp-handler@1.1.0` or `@modelcontextprotocol/sdk@1.26.0`; update them only as a tested pair.
 - Never use floating `npx`/`pnpm dlx` commands. Development CLIs must be pinned dependencies invoked through pnpm scripts.
 - Keep `package.json` as the only package/server version source, and bump it forward (never regress a released `serverInfo.version`).
