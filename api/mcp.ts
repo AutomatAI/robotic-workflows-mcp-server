@@ -712,6 +712,25 @@ const mapResource = (resource: any) => ({
   updatedAt: resource.updatedAt,
 });
 
+// Studio's PUT/POST resource routes are contractually 200/201-with-body; a
+// success status carrying no resource is a Studio/network anomaly, not an
+// empty result. Fail closed with a clear error instead of silently mapping
+// undefined (PUT) or defaulting to an empty array that reads as "0 created"
+// (POST).
+function expectResource(response: any): any {
+  if (!response?.resource) {
+    throw new ApiError(502, "internal_error", "Studio returned a success status without the updated resource.");
+  }
+  return mapResource(response.resource);
+}
+
+function expectResources(response: any): any[] {
+  if (!response?.resources?.length) {
+    throw new ApiError(502, "internal_error", "Studio returned a success status without any created resources.");
+  }
+  return response.resources.map(mapResource);
+}
+
 async function findScheduleForReconciliation(workflowId: string, scheduleId: string): Promise<any | null> {
   for (let page = 1; page <= SCHEDULE_RECONCILE_MAX_PAGES; page++) {
     const response = await api("GET", `/api/agent/workflows/${workflowId}/schedules`, {
@@ -1845,7 +1864,7 @@ const baseHandler = createMcpHandler(
             const updated = await api("PUT", `/api/agent/resources/${resourceId}`, {
               body: { value, description },
             });
-            return result({ resource: mapResource(updated.resource) });
+            return result({ resource: expectResource(updated) });
           }
           if (!name) return toolFailure(400, "Provide resourceId or name.");
           if (lifecycle) {
@@ -1854,7 +1873,7 @@ const baseHandler = createMcpHandler(
               const updated = await api("PUT", `/api/agent/resources/${existing.id}`, {
                 body: { value, description },
               });
-              return result({ resource: mapResource(updated.resource) });
+              return result({ resource: expectResource(updated) });
             }
           } else {
             const existing = await findResources(name);
@@ -1868,13 +1887,13 @@ const baseHandler = createMcpHandler(
               const updated = await api("PUT", `/api/agent/resources/${existing[0].id}`, {
                 body: { value, description },
               });
-              return result({ resource: mapResource(updated.resource) });
+              return result({ resource: expectResource(updated) });
             }
           }
           const created = await api("POST", "/api/agent/resources", {
             body: { name, value, description, lifecycle },
           });
-          return result({ resources: (created.resources ?? []).map(mapResource) });
+          return result({ resources: expectResources(created) });
         } catch (e) {
           return fail(e);
         }

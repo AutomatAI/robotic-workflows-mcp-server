@@ -1359,6 +1359,49 @@ describe("registered tool contract", () => {
     }
   });
 
+  it("fails closed when Studio returns success without the expected resource payload", async () => {
+    const fixture = createStudioFetchFixture((request) => {
+      if (request.method === "PUT") return jsonResponse({});
+      if (request.method === "POST") return jsonResponse({});
+      return jsonResponse({ resources: [], currentPage: 1, totalPages: 1 });
+    });
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      expect(
+        parseTextResult(
+          await client.callTool({
+            name: "set_resource",
+            arguments: { resourceId: "22222222-2222-4222-8222-222222222222", value: { count: 2 } },
+          }),
+        ),
+      ).toEqual({
+        error: {
+          code: "internal_error",
+          status: 502,
+          message: "Studio returned a success status without the updated resource.",
+        },
+      });
+
+      expect(
+        parseTextResult(
+          await client.callTool({
+            name: "set_resource",
+            arguments: { name: "brand-new-resource", value: {} },
+          }),
+        ),
+      ).toEqual({
+        error: {
+          code: "internal_error",
+          status: 502,
+          message: "Studio returned a success status without any created resources.",
+        },
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it("updates the unique row found by a name-only set_resource lookup", async () => {
     const resourceId = "22222222-2222-4222-8222-222222222222";
     const fixture = createStudioFetchFixture((request) => {
