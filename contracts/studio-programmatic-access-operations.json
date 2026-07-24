@@ -7,8 +7,40 @@
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/extractors",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "config": {
+            "properties": {
+              "modelTier": {
+                "type": "string"
+              },
+              "options": {}
+            },
+            "required": [
+              "modelTier",
+              "options"
+            ],
+            "type": "object"
+          },
+          "description": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "schema": {}
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "querySchema": null,
-      "wrapperTier": "authorship",
+      "wrapperTier": "write",
       "effectiveTier": null,
       "successStatus": 201,
       "pagination": null,
@@ -19,8 +51,9 @@
       "method": "DELETE",
       "path": "/api/v1/projects/{projectId}/extractors/{extractorId}",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
-      "wrapperTier": "authorship",
+      "wrapperTier": "write",
       "effectiveTier": null,
       "successStatus": 200,
       "pagination": null,
@@ -31,6 +64,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/extractors/{extractorId}",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "read",
       "effectiveTier": null,
@@ -43,6 +77,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/extractors",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -79,6 +114,35 @@
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/extractors/{extractorId}/run",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "extractorVersionId": {
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "mimeType": {
+            "type": "string"
+          },
+          "storagePath": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "timeout": {
+            "maximum": 300,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "storagePath"
+        ],
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "write",
       "effectiveTier": null,
@@ -93,8 +157,59 @@
       "method": "PATCH",
       "path": "/api/v1/projects/{projectId}/extractors/{extractorId}",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "required": [
+              "name"
+            ]
+          },
+          {
+            "required": [
+              "description"
+            ]
+          },
+          {
+            "required": [
+              "schema"
+            ]
+          },
+          {
+            "required": [
+              "config"
+            ]
+          }
+        ],
+        "properties": {
+          "config": {
+            "properties": {
+              "modelTier": {
+                "type": "string"
+              },
+              "options": {}
+            },
+            "required": [
+              "modelTier",
+              "options"
+            ],
+            "type": "object"
+          },
+          "description": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "schema": {}
+        },
+        "type": "object"
+      },
       "querySchema": null,
-      "wrapperTier": "authorship",
+      "wrapperTier": "write",
       "effectiveTier": null,
       "successStatus": 200,
       "pagination": null,
@@ -105,6 +220,41 @@
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/hitl/tasks/{taskId}/complete",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "action": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "secretKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "write",
       "effectiveTier": null,
@@ -119,6 +269,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/hitl/tasks",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -164,6 +315,7 @@
       "method": "GET",
       "path": "/api/v1/projects",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "read",
       "effectiveTier": null,
@@ -190,42 +342,196 @@
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/resources",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "config": {
+                "not": {}
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "maxLength": 500,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lifecycle": {
+                "enum": [
+                  "development",
+                  "preview",
+                  "active"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "source": {
+                "const": "manual",
+                "type": "string"
+              },
+              "value": {}
+            },
+            "required": [
+              "name",
+              "value",
+              "source"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "config": {
+                "not": {}
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "maxLength": 500,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lifecycle": {
+                "enum": [
+                  "development",
+                  "preview",
+                  "active"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "source": {
+                "const": "workflow",
+                "type": "string"
+              },
+              "value": {}
+            },
+            "required": [
+              "name",
+              "value",
+              "source"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "config": {
+                "additionalProperties": false,
+                "properties": {
+                  "schedule": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "maxLength": 500,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lifecycle": {
+                "enum": [
+                  "development",
+                  "preview",
+                  "active"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "source": {
+                "const": "api",
+                "type": "string"
+              },
+              "value": {}
+            },
+            "required": [
+              "name",
+              "value",
+              "source",
+              "config"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
       "successStatus": 201,
       "pagination": null,
-      "stableErrorCodes": []
+      "stableErrorCodes": [
+        "resource_conflict",
+        "resource_invalid_config"
+      ]
     },
     {
       "operationId": "resources.delete",
       "method": "DELETE",
       "path": "/api/v1/projects/{projectId}/resources/{resourceId}",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
       "successStatus": 200,
       "pagination": null,
-      "stableErrorCodes": []
+      "stableErrorCodes": [
+        "resource_conflict",
+        "resource_not_found",
+        "resource_source_conflict"
+      ]
     },
     {
       "operationId": "resources.get",
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/resources/{resourceId}",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
-      "wrapperTier": "read",
+      "wrapperTier": "authorship",
       "effectiveTier": null,
       "successStatus": 200,
       "pagination": null,
-      "stableErrorCodes": []
+      "stableErrorCodes": [
+        "resource_not_found"
+      ]
     },
     {
       "operationId": "resources.list",
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/resources",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -244,7 +550,7 @@
         },
         "type": "object"
       },
-      "wrapperTier": "read",
+      "wrapperTier": "authorship",
       "effectiveTier": null,
       "successStatus": 200,
       "pagination": {
@@ -269,18 +575,154 @@
       "method": "PUT",
       "path": "/api/v1/projects/{projectId}/resources/{resourceId}",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "config": {
+            "additionalProperties": false,
+            "properties": {
+              "schedule": {
+                "type": "string"
+              },
+              "url": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "url"
+            ],
+            "type": "object"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "manual",
+              "api",
+              "workflow"
+            ],
+            "type": "string"
+          },
+          "value": {}
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
       "successStatus": 200,
       "pagination": null,
-      "stableErrorCodes": []
+      "stableErrorCodes": [
+        "resource_conflict",
+        "resource_invalid_config",
+        "resource_not_found",
+        "resource_source_conflict"
+      ]
+    },
+    {
+      "operationId": "resources.test_fetch",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/resources/test-fetch",
+      "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": [
+        "resource_fetch_invalid_json",
+        "resource_fetch_redirect",
+        "resource_fetch_status",
+        "resource_fetch_timeout",
+        "resource_fetch_too_large",
+        "resource_invalid_config"
+      ]
     },
     {
       "operationId": "schedules.create",
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": {},
+        "properties": {
+          "inputResourceName": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recurrenceRule": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "pattern": "^(?![\\s\\S]*\\b[Tt][Zz][Ii][Dd]=)[\\s\\S]*$",
+            "type": "string"
+          },
+          "startAt": {
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
+            "type": "string"
+          }
+        },
+        "propertyNames": {
+          "not": {
+            "pattern": "^(?:[Tt][Ii][Mm][Ee][Zz][Oo][Nn][Ee]|[Tt][Zz][Ii][Dd]|[Tt][Zz])$"
+          }
+        },
+        "required": [
+          "recurrenceRule"
+        ],
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
@@ -293,6 +735,7 @@
       "method": "DELETE",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules/{scheduleId}",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
@@ -305,6 +748,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "read",
       "effectiveTier": null,
@@ -331,6 +775,86 @@
       "method": "PATCH",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules/{scheduleId}",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": {},
+        "anyOf": [
+          {
+            "required": [
+              "name"
+            ]
+          },
+          {
+            "required": [
+              "status"
+            ]
+          },
+          {
+            "required": [
+              "recurrenceRule"
+            ]
+          },
+          {
+            "required": [
+              "startAt"
+            ]
+          },
+          {
+            "required": [
+              "inputResourceName"
+            ]
+          }
+        ],
+        "properties": {
+          "inputResourceName": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recurrenceRule": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "pattern": "^(?![\\s\\S]*\\b[Tt][Zz][Ii][Dd]=)[\\s\\S]*$",
+            "type": "string"
+          },
+          "startAt": {
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "type": "string"
+          }
+        },
+        "propertyNames": {
+          "not": {
+            "pattern": "^(?:[Tt][Ii][Mm][Ee][Zz][Oo][Nn][Ee]|[Tt][Zz][Ii][Dd]|[Tt][Zz])$"
+          }
+        },
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
@@ -343,6 +867,7 @@
       "method": "GET",
       "path": "/api/v1/schema",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -365,6 +890,7 @@
       "method": "DELETE",
       "path": "/api/v1/projects/{projectId}/secrets/{secretName}",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -394,6 +920,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/secrets",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -415,7 +942,7 @@
         ],
         "type": "object"
       },
-      "wrapperTier": "read",
+      "wrapperTier": "authorship",
       "effectiveTier": null,
       "successStatus": 200,
       "pagination": {
@@ -440,6 +967,20 @@
       "method": "PUT",
       "path": "/api/v1/projects/{projectId}/secrets/{secretName}",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "maxLength": 65536,
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -469,6 +1010,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/sessions/{sessionId}",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "read",
       "effectiveTier": null,
@@ -481,6 +1023,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/logs",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "read",
       "effectiveTier": null,
@@ -493,6 +1036,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/sessions",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -541,6 +1085,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/nodes",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "read",
       "effectiveTier": null,
@@ -553,6 +1098,16 @@
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/stop",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "secretKey": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "write",
       "effectiveTier": null,
@@ -565,6 +1120,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions/{versionId}",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "read",
       "effectiveTier": {
@@ -580,8 +1136,9 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": null,
-      "wrapperTier": "read",
+      "wrapperTier": "authorship",
       "effectiveTier": null,
       "successStatus": 200,
       "pagination": {
@@ -606,6 +1163,17 @@
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions/{versionId}/revert",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "expectedActiveVersionId": {
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
@@ -618,6 +1186,22 @@
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/workflows",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "definition": {
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "definition"
+        ],
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
@@ -630,6 +1214,7 @@
       "method": "DELETE",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
       "requestLocation": "none",
+      "requestSchema": null,
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
@@ -642,6 +1227,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "if": {
@@ -695,6 +1281,7 @@
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/workflows",
       "requestLocation": "query",
+      "requestSchema": null,
       "querySchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -740,6 +1327,32 @@
       "method": "PUT",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "definition": {
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "expectedActiveVersionId": {
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "type": "string"
+          },
+          "versionName": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "definition"
+        ],
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,
@@ -752,6 +1365,34 @@
       "method": "POST",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/run",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "branch": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "environment": {
+            "enum": [
+              "production",
+              "staging",
+              "development",
+              "preview"
+            ],
+            "type": "string"
+          },
+          "input": {
+            "additionalProperties": {},
+            "default": {},
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "write",
       "effectiveTier": null,
@@ -766,6 +1407,71 @@
       "method": "PATCH",
       "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
       "requestLocation": "body",
+      "requestSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "required": [
+              "name"
+            ]
+          },
+          {
+            "required": [
+              "description"
+            ]
+          },
+          {
+            "required": [
+              "status"
+            ]
+          },
+          {
+            "required": [
+              "apiEnabled"
+            ]
+          },
+          {
+            "required": [
+              "apiUrlSlug"
+            ]
+          }
+        ],
+        "properties": {
+          "apiEnabled": {
+            "type": "boolean"
+          },
+          "apiUrlSlug": {
+            "pattern": "^[a-z0-9-]{1,100}$",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "development",
+              "preview",
+              "active",
+              "disabled"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "querySchema": null,
       "wrapperTier": "authorship",
       "effectiveTier": null,

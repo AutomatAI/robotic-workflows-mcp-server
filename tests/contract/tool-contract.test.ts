@@ -156,6 +156,10 @@ const toolClassifications = {
       "DELETE /api/v1/projects/{projectId}/resources/{resourceId}",
     ],
   },
+  test_resource_api: {
+    kind: "studio",
+    operations: ["POST /api/v1/projects/{projectId}/resources/test-fetch"],
+  },
   list_extractors: { kind: "studio", operations: ["GET /api/v1/projects/{projectId}/extractors"] },
   get_extractor: {
     kind: "studio",
@@ -232,6 +236,7 @@ describe("registered tool contract", () => {
           "get_resource",
           "set_resource",
           "delete_resource",
+          "test_resource_api",
           "list_extractors",
           "get_extractor",
         ]
@@ -253,6 +258,31 @@ describe("registered tool contract", () => {
         expect(tool.annotations, `${tool.name} annotations`).toBeDefined();
         expect(toolClassifications[tool.name as keyof typeof toolClassifications]).toBeDefined();
       }
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("exposes resource guidance and external-read metadata", async () => {
+    const { client } = await connectTestClient();
+    try {
+      const docs = parseTextResult(
+        await client.callTool({
+          name: "get_docs",
+          arguments: { topic: "resources" },
+        }),
+      );
+      expect(docs).toEqual({
+        resources: expect.stringContaining("environment control plane"),
+      });
+
+      const testResourceApi = (await client.listTools()).tools.find((tool) => tool.name === "test_resource_api");
+      expect(testResourceApi?.annotations).toEqual({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      });
     } finally {
       await client.close();
     }
@@ -284,6 +314,7 @@ describe("registered tool contract", () => {
         expect(operation.requestLocation, `${operation.operationId} pagination location`).toBe("query");
         expect(operation.pagination.style, `${operation.operationId} pagination style`).toBe("page_page_size");
       }
+      expect(operation.requestSchema === null || typeof operation.requestSchema === "object").toBe(true);
       if (operation.effectiveTier !== null) {
         expect(operation.effectiveTier).toMatchObject({
           tier: expect.stringMatching(/^(read|write|authorship)$/),
@@ -338,6 +369,44 @@ describe("registered tool contract", () => {
       pagination: null,
       stableErrorCodes: ["workflow_not_found"],
     });
+    expect(byId.get("resources.list")).toMatchObject({ wrapperTier: "authorship" });
+    expect(byId.get("resources.get")).toMatchObject({ wrapperTier: "authorship" });
+    expect(byId.get("resources.create")).toMatchObject({
+      wrapperTier: "authorship",
+      requestSchema: { oneOf: expect.arrayContaining([expect.objectContaining({ additionalProperties: false })]) },
+      stableErrorCodes: ["resource_conflict", "resource_invalid_config"],
+    });
+    expect(byId.get("resources.put")).toMatchObject({
+      wrapperTier: "authorship",
+      requestSchema: {
+        required: ["value"],
+        properties: {
+          source: { enum: ["manual", "api", "workflow"] },
+          config: { required: ["url"], additionalProperties: false },
+        },
+        additionalProperties: false,
+      },
+      stableErrorCodes: [
+        "resource_conflict",
+        "resource_invalid_config",
+        "resource_not_found",
+        "resource_source_conflict",
+      ],
+    });
+    expect(byId.get("resources.test_fetch")).toMatchObject({
+      method: "POST",
+      path: "/api/v1/projects/{projectId}/resources/test-fetch",
+      wrapperTier: "authorship",
+      requestSchema: { required: ["url"] },
+      stableErrorCodes: expect.arrayContaining(["resource_fetch_timeout", "resource_fetch_invalid_json"]),
+    });
+    expect(byId.get("versions.list")).toMatchObject({ wrapperTier: "authorship" });
+    expect(byId.get("versions.get")).toMatchObject({
+      wrapperTier: "read",
+      effectiveTier: { tier: "authorship" },
+    });
+    expect(byId.get("secrets.list_names")).toMatchObject({ wrapperTier: "authorship" });
+    expect(byId.get("extractors.list")).toMatchObject({ wrapperTier: "read" });
   });
 
   it("projects a representative upstream Studio contract deterministically", () => {
@@ -373,6 +442,7 @@ describe("registered tool contract", () => {
             method: "GET",
             path: "/api/v1/projects",
             requestLocation: "query",
+            requestSchema: null,
             querySchema: null,
             wrapperTier: "read",
             effectiveTier: null,
@@ -388,6 +458,15 @@ describe("registered tool contract", () => {
             method: "POST",
             path: "/api/v1/projects/{projectId}/workflows",
             requestLocation: "body",
+            requestSchema: {
+              properties: {
+                definition: {
+                  type: "object",
+                },
+              },
+              required: ["definition"],
+              type: "object",
+            },
             querySchema: null,
             wrapperTier: "authorship",
             effectiveTier: null,
@@ -400,6 +479,7 @@ describe("registered tool contract", () => {
             method: "GET",
             path: "/api/v1/projects/{projectId}/workflows/{workflowId}",
             requestLocation: "query",
+            requestSchema: null,
             querySchema: {
               properties: {
                 view: {
@@ -1685,6 +1765,172 @@ describe("registered tool contract", () => {
           },
         ],
       });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("maps manual, API, and workflow resource writes to the revision-2 contract", async () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const apiId = "22222222-2222-4222-8222-222222222222";
+    const workflowId = "33333333-3333-4333-8333-333333333333";
+    const fixture = createStudioFetchFixture((request) => {
+      if (request.method === "GET") {
+        return jsonResponse({ resources: [], currentPage: 1, totalPages: 1 });
+      }
+      if (request.method === "DELETE") return jsonResponse({ success: true });
+      const body = request.body as Record<string, unknown>;
+      const source = (body.source as string | undefined) ?? "manual";
+      const id = source === "workflow" ? workflowId : apiId;
+      const resource = {
+        id,
+        name: source === "api" ? "exchange-rates" : "workflow-cache",
+        description: body.description ?? null,
+        value: body.value,
+        source,
+        config: source === "api" ? body.config : null,
+        lifecycle: "development",
+        lastFetchedAt: source === "api" ? "2026-07-24T10:00:00Z" : null,
+        createdAt: "2026-07-24T09:00:00Z",
+        updatedAt: "2026-07-24T10:00:00Z",
+      };
+      return jsonResponse(request.method === "POST" ? { resources: [resource] } : { resource }, {
+        status: request.method === "POST" ? 201 : 200,
+      });
+    });
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient({ projectId });
+    try {
+      await client.callTool({
+        name: "set_resource",
+        arguments: { name: "legacy-manual", value: { enabled: true } },
+      });
+      expect(fixture.requests[1]?.body).toEqual({
+        name: "legacy-manual",
+        value: { enabled: true },
+        source: "manual",
+      });
+
+      const apiResult = parseTextResult(
+        await client.callTool({
+          name: "set_resource",
+          arguments: {
+            name: "exchange-rates",
+            lifecycle: "development",
+            value: { USD: 1 },
+            source: "api",
+            config: { url: "https://example.com/rates", schedule: "0 * * * *" },
+            description: "Hourly rates",
+          },
+        }),
+      );
+      expect(fixture.requests[3]?.body).toEqual({
+        name: "exchange-rates",
+        value: { USD: 1 },
+        source: "api",
+        config: { url: "https://example.com/rates", schedule: "0 * * * *" },
+        description: "Hourly rates",
+        lifecycle: "development",
+      });
+      expect(apiResult).toEqual({
+        resources: [
+          {
+            resourceId: apiId,
+            name: "exchange-rates",
+            kind: "data",
+            description: "Hourly rates",
+            value: { USD: 1 },
+            source: "api",
+            config: { url: "https://example.com/rates", schedule: "0 * * * *" },
+            lifecycle: "development",
+            lastFetchedAt: "2026-07-24T10:00:00Z",
+            createdAt: "2026-07-24T09:00:00Z",
+            updatedAt: "2026-07-24T10:00:00Z",
+          },
+        ],
+      });
+
+      await client.callTool({
+        name: "set_resource",
+        arguments: {
+          resourceId: workflowId,
+          value: { cursor: 2 },
+          source: "workflow",
+          description: null,
+        },
+      });
+      expect(fixture.requests[4]?.body).toEqual({
+        value: { cursor: 2 },
+        source: "workflow",
+        description: null,
+      });
+
+      await client.callTool({ name: "delete_resource", arguments: { resourceId: apiId } });
+      expect(fixture.requests[5]).toMatchObject({ method: "DELETE" });
+      expect(fixture.requests[5]?.url.pathname).toBe(`/api/v1/projects/${projectId}/resources/${apiId}`);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("passes source/config combinations to Studio and sanitizes resource failures", async () => {
+    const leakedValue = "customer-value-must-not-leak";
+    const fixture = createStudioFetchFixture(() =>
+      jsonResponse(
+        {
+          error: "resource_invalid_config",
+          message: "Resource configuration is invalid.",
+        },
+        { status: 400 },
+      ),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      const response = parseTextResult(
+        await client.callTool({
+          name: "set_resource",
+          arguments: {
+            resourceId: "22222222-2222-4222-8222-222222222222",
+            value: leakedValue,
+            source: "manual",
+            config: { url: "https://example.com/data" },
+          },
+        }),
+      );
+      expect(fixture.requests[0]?.body).toEqual({
+        value: leakedValue,
+        source: "manual",
+        config: { url: "https://example.com/data" },
+      });
+      expect(response).toMatchObject({
+        error: { code: "bad_request", status: 400, message: "Resource configuration is invalid." },
+      });
+      expect(JSON.stringify(response)).not.toContain(leakedValue);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("tests an external resource API without persistence", async () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const fixture = createStudioFetchFixture(() => jsonResponse({ value: { ok: true } }));
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient({ projectId });
+    try {
+      expect(
+        parseTextResult(
+          await client.callTool({
+            name: "test_resource_api",
+            arguments: { url: "https://example.com/data.json" },
+          }),
+        ),
+      ).toEqual({ value: { ok: true } });
+      expect(fixture.requests[0]).toMatchObject({
+        method: "POST",
+        body: { url: "https://example.com/data.json" },
+      });
+      expect(fixture.requests[0]?.url.pathname).toBe(`/api/v1/projects/${projectId}/resources/test-fetch`);
     } finally {
       await client.close();
     }

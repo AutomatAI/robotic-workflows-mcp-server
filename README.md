@@ -53,7 +53,7 @@ Replace `pat_…` with your personal access token. A PAT spans every project you
 
 For a one-shot/stateless caller with no durable connection, skip `set_project` entirely and always pass `project_id` / `x-project-id`; this is the safest migration target and already takes precedence. For a recurring connector, `set_project` uses token+connector isolation when the caller supplies a stable `connection_id` query parameter, `x-connection-id` header, or `mcp-session-id` header. Treat `mcp-session-id` as caller-supplied identity; do not assume this stateless endpoint supplies one. Only when none of those identities is present does compatibility behavior use a PAT-global remembered bucket. Every bare caller sharing that PAT then shares one selection, so use a unique PAT per bare connector to prevent collisions. Connections pinned with `project_id` / `x-project-id` need no connector id. Secrets tools additionally need the Doppler identifiers (`dopplerProject`/`dopplerConfig` tool inputs, or `STUDIO_DOPPLER_PROJECT`/`STUDIO_DOPPLER_CONFIG`).
 
-**Token tiers:** read tokens list/inspect (no definition JSON — `read_workflow` `full`/`node` need an authorship-tier PAT; `graph` degrades gracefully); write tokens also run workflows / stop sessions / complete HITL tasks; workflow, schedule, secret, and resource mutations need authorship (author role + write token). Tier ledger: studio `docs/PROGRAMMATIC_ACCESS.md`.
+**Token tiers:** read tokens list/inspect most domains (no definition JSON — `read_workflow` `full`/`node` need an authorship-tier PAT; `graph` degrades gracefully); write tokens also run workflows / stop sessions / complete HITL tasks; workflow, schedule, and secret mutations need authorship. Every resource control-plane tool—list, get, test, create, update, and delete—also requires authorship (author role + write token). Tier ledger: studio `docs/PROGRAMMATIC_ACCESS.md`.
 
 ## Workflow lifecycle policy (for agents)
 
@@ -309,19 +309,22 @@ Project-scoped. Values are never returned.
 
 ## Resources
 
-Data resources, referenced by name from `block`/`document` nodes and schedule inputs. Each has a `lifecycle` (development | preview | active).
+The PAT surface is the environment control plane for data resources; project files are separate. `source` controls behavior: `manual` is operator-managed, `api` may refresh from `config.url`, and `workflow` may be written by running code. Values written through this façade can therefore be overwritten later for API/workflow sources. Prefer stable `resourceId`; name/lifecycle lookup is a bounded, potentially racy convenience.
 
 ### `list_resources`
-- Input: `{ lifecycle?, search?, limit?, cursor? }` · Output: `{ items: [{ resourceId, name, kind, description, lifecycle, updatedAt }], nextCursor, truncated? }`
+- Input: `{ lifecycle?, search?, limit?, cursor? }` · Output: `{ items: [{ resourceId, name, kind:'data', description, value, source, config, lifecycle, lastFetchedAt, createdAt, updatedAt }], nextCursor, truncated? }`. `config` is populated only for API resources and is otherwise `null`.
 
 ### `get_resource`
-- Input: `{ resourceId }` or `{ name, lifecycle? }` · Output: `{ resourceId, name, kind: 'data', value, description, lifecycle, updatedAt }`. A unique name-only match succeeds; multiple lifecycle rows return `conflict` and require `lifecycle` or `resourceId`.
+- Input: `{ resourceId }` or `{ name, lifecycle? }` · Output: the normalized full data-resource shape above. A unique name-only match succeeds; multiple lifecycle rows return `conflict` and require `lifecycle` or `resourceId`.
 
 ### `set_resource`
-- Input: `{ resourceId, value, description? }` to replace one row, `{ name, lifecycle, value, description? }` to upsert one stage, or `{ name, value, description? }` for compatibility name-only behavior. Name-only performs a complete bounded lookup: update one unique row, return `conflict` for multiple lifecycle rows, or create and seed all stages when absent. Outputs normalized `resourceId` fields. File-resource uploads are not supported.
+- Input: `{ resourceId, value, source?, config?, description? }` to update one row, `{ name, lifecycle?, value, source?, config?, description? }` for compatibility upsert behavior. Create defaults `source` to `manual`; accepted sources are `manual | api | workflow`. API source requires strict `config:{ url, schedule? }`; Studio validates source/config combinations. Update sends the full value plus supplied source/config/description and never moves lifecycle. Name-only performs a complete bounded lookup: update one unique row, conflict on multiple lifecycle rows, or create when absent. Output is the normalized full shape. File resources are not supported here.
 
 ### `delete_resource`
-- Input: `{ resourceId }` or `{ name, lifecycle? }` · Output: `{ success: true, resourceId }`. Name-only follows the same unique-or-conflict rule as `get_resource`.
+- Input: `{ resourceId }` or `{ name, lifecycle? }` · Output: `{ success: true, resourceId }`. Deletes manual, API, and workflow data resources. Name-only follows the same unique-or-conflict rule as `get_resource`.
+
+### `test_resource_api`
+- Input: `{ url }` · Output: `{ value }` · → `POST /api/v1/projects/{projectId}/resources/test-fetch`. Performs an external fetch through Studio's resource rules without persisting a resource.
 
 ## Extractors
 

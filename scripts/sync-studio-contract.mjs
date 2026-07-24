@@ -87,6 +87,13 @@ const operations = source.operations.map((operation, index) => {
     throw new Error(`Studio operation ${operation.operationId} has an invalid querySchema.`);
   }
   if (
+    operation.requestSchema !== undefined &&
+    operation.requestSchema !== null &&
+    (typeof operation.requestSchema !== "object" || Array.isArray(operation.requestSchema))
+  ) {
+    throw new Error(`Studio operation ${operation.operationId} has an invalid requestSchema.`);
+  }
+  if (
     !Array.isArray(operation.stableErrorCodes) ||
     operation.stableErrorCodes.some((code) => typeof code !== "string" || code.length === 0)
   ) {
@@ -108,6 +115,7 @@ const operations = source.operations.map((operation, index) => {
     method: operation.method,
     path: operation.path,
     requestLocation: operation.requestLocation,
+    requestSchema: canonicalize(operation.requestSchema ?? null),
     querySchema: canonicalize(operation.querySchema ?? null),
     wrapperTier: operation.wrapperTier,
     effectiveTier: canonicalize(operation.effectiveTier ?? null),
