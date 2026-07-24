@@ -62,12 +62,28 @@ async function invokeVercelHandler(input: string | URL, init?: RequestInit): Pro
   }
 }
 
-export async function connectTestClient() {
+export async function connectTestClient(
+  options: { apiKey?: string; projectId?: string | null; connectionId?: string; headers?: Record<string, string> } = {},
+) {
   const client = new Client({ name: "repository-contract-tests", version: "1.0.0" });
-  const transport = new StreamableHTTPClientTransport(
-    new URL("https://mcp.test/api/mcp?api_key=pat_test_fixture&project_id=11111111-1111-4111-8111-111111111111"),
-    { fetch: invokeVercelHandler },
-  );
+  const url = new URL("https://mcp.test/api/mcp");
+  url.searchParams.set("api_key", options.apiKey ?? "pat_test_fixture");
+  if (options.projectId !== null) {
+    url.searchParams.set("project_id", options.projectId ?? "11111111-1111-4111-8111-111111111111");
+  }
+  if (options.connectionId) url.searchParams.set("connection_id", options.connectionId);
+  const transport = new StreamableHTTPClientTransport(url, {
+    fetch: (input, init) => {
+      const headers = new Headers(init?.headers);
+      for (const [name, value] of Object.entries(options.headers ?? {})) {
+        headers.set(name, value);
+      }
+      return invokeVercelHandler(input, {
+        ...init,
+        headers,
+      });
+    },
+  });
   await client.connect(transport);
   return { client, transport };
 }

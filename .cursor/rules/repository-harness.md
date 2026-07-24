@@ -1,6 +1,6 @@
 ---
-globs: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "scripts/check-exact-dependencies.mjs", "tsconfig.json", "biome.json", "vitest.config.ts", ".node-version", ".github/**", ".cursor/**", ".claude/**", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
-paths: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "scripts/check-exact-dependencies.mjs", "tsconfig.json", "biome.json", "vitest.config.ts", ".node-version", ".github/**", ".cursor/**", ".claude/**", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
+globs: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json", "biome.json", "vitest.config.ts", ".node-version", ".github/**", ".cursor/**", ".claude/**", "scripts/**", "contracts/**", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
+paths: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json", "biome.json", "vitest.config.ts", ".node-version", ".github/**", ".cursor/**", ".claude/**", "scripts/**", "contracts/**", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
 alwaysApply: false
 ---
 
@@ -16,5 +16,7 @@ alwaysApply: false
 - Coverage thresholds in `vitest.config.ts` are a ratchet, not a target: bump them only after real tests raise measured coverage, never above the currently-measured numbers, and never lower them.
 - Keep `.node-version`, `engines.node`, `packageManager`, and CI's Node setup compatible.
 - Every Tier 2 rule needs a matching `.claude/rules` symlink. `.claude/commands` must point to `.cursor/commands`.
+- Never import a sibling Studio working tree at test/runtime. Synchronize the compact Studio operation projection explicitly with `contract:sync`, verify it against a specified source with `contract:check`, and commit the projection.
+- Query-location Studio operations may expose `querySchema` or pagination-only query metadata; never copy or teach a query operation's stale `requestSchema`.
 - Never add a software license or license field without an explicit owner decision.
 - Do not encode tickets, pull requests, dates, temporary rollout states, or phase labels in agent rules.

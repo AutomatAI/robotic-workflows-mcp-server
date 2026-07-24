@@ -7,8 +7,8 @@ Read `AGENTS.md` and the scoped rules matching the diff before reviewing.
 Read this section first — these are intentional and not bugs.
 
 - **`?api_key=pat_…` in the connector URL.** MCP clients (Claude, Cursor, Inspector) configure Streamable HTTP servers via a single URL, so the token travels in the query string by design — this is the standard MCP connector pattern, not a leaked-credential finding. It is a characterized, pre-existing surface; don't re-flag it as new.
-- **The in-process `memFallback` Map for `set_project`.** It only activates when `KV_REST_API_URL`/`KV_REST_API_TOKEN` are absent (local dev, tests, a single stdio process). In serverless/multi-instance deployment, Redis is configured and is the actual store. Don't suggest removing the fallback or replacing it with Redis "always" — the point is graceful local dev without Redis.
-- **`redis.get` wrapped in try/catch that returns `undefined` on failure.** A Redis blip must never break auth; treating a Redis error as "no remembered project" is intentional self-healing (the caller re-runs `set_project`). Don't flag the swallowed error as a missing failure path.
+- **The in-process `memFallback` Map for `set_project`.** It serves local dev when Redis is absent and preserves a connector selection on the current instance when a Redis read/write fails. Keys use the same token+connector hash as Redis, so fallback never becomes PAT-global. Don't suggest removing it or replacing it with Redis "always."
+- **Redis get/set wrapped in best-effort fallbacks.** A Redis blip must never break project selection: every successful Redis write is mirrored into connector-scoped memory before returning, reads consult that mirror, and failed writes store there before returning the documented `set_project` success. Cross-instance persistence resumes after Redis recovers.
 - **The text-only JSON tool result shape** (no `structuredContent`/`outputSchema`/`isError` on success). This is characterized baseline behavior tracked in `AGENTS.md` invariant 8 and `RUBRIC.md` — don't flag it as "missing richer MCP output," only flag an *inconsistent* new addition (see below).
 - **The manual MCP Inspector not running in CI.** It's a developer aid, not a substitute for the protocol test harness.
 - **A baseline tool-name snapshot test**, provided it isn't paired with a fixed numeric tool-count assertion as the actual invariant.
@@ -19,7 +19,7 @@ Read this section first — these are intentional and not bugs.
 - Any committed PAT, API key, Redis token, Vercel bypass secret, or non-placeholder credential.
 - Logging or returning caller authorization, query-string credentials, secret values, or protection-bypass headers.
 - A Studio-backed tool that bypasses the shared `api()` client or loses explicit project scoping.
-- A change to `tokenBucket()`, `rememberedProjectId()`, or `rememberProject()` that derives the Redis/`memFallback` key from anything other than a per-caller-token hash (e.g. a global/static key, the project id alone, or a caller-supplied value) — that would leak one user's remembered project selection onto another user's session.
+- A change to `tokenBucket()`, `rememberedProjectId()`, or `rememberProject()` that does not derive the Redis/`memFallback` key from BOTH the caller-token hash and the server-recognized logical connector identity (`connection_id`, `x-connection-id`, or `mcp-session-id`). Never fall back to PAT-global remembered state when connector identity is absent, and never key on project id or connector id without the token — either mistake can redirect another caller/connector.
 - CORS headers that do not allow a request header accepted by the endpoint.
 - A claim that `dryRun` universally suppresses side effects.
 - A server version hardcoded separately from `package.json`, or a `package.json` version bump that regresses below the currently deployed `serverInfo.version`.
@@ -27,7 +27,7 @@ Read this section first — these are intentional and not bugs.
 - A protocol test that replaces the SDK Streamable HTTP direct-handler harness with sockets or `InMemoryTransport`.
 - A fixture that can reach live Studio, Redis, or Vercel infrastructure.
 - A registered tool missing title, description, object input schema, annotations, or operation classification.
-- A new `studio`/`hybrid`-classified tool added to `toolClassifications` (`tests/contract/tool-contract.test.ts`) without at least one fixture-backed test verifying the tool's actual recorded request (method + path) against its declared `operations` — a key-set-completeness assertion alone is not verification.
+- A classified Studio method+path absent from the synchronized compact Studio contract projection, or a multi-operation tool whose fixtures do not collectively exercise every declared path and reject undeclared calls.
 - New `outputSchema`, `structuredContent`, or `isError` behavior without an explicit compatibility test and documentation update.
 - A tool's `catch` block that returns something other than the shared `fail(e)` envelope (e.g. hand-rolls its own error object, or forwards a raw `Response`/headers/stack trace) — every tool must funnel failures through the one characterized error shape.
 - A new tool that reads or forwards a credential from a source other than `api_key`, `x-api-key`, or `Authorization: Bearer`.

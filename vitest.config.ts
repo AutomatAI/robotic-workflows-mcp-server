@@ -14,10 +14,10 @@ export default defineConfig({
       // them above currently-measured coverage. Keep each floor just below
       // the measured value so ordinary instrumentation variance has margin.
       thresholds: {
-        lines: 43,
-        statements: 40,
-        functions: 37,
-        branches: 27,
+        lines: 70,
+        statements: 65,
+        functions: 68,
+        branches: 45,
       },
     },
   },

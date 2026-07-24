@@ -11,6 +11,8 @@
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod",
+    "contract:sync": "node scripts/sync-studio-contract.mjs",
+    "contract:check": "node scripts/sync-studio-contract.mjs --check",
     "typecheck": "tsc --noEmit",
     "check:dependencies": "node scripts/check-exact-dependencies.mjs",
     "lint": "biome lint .",

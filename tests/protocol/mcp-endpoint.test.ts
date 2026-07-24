@@ -36,6 +36,15 @@ describe("Streamable HTTP MCP endpoint", () => {
           development: expect.stringContaining("not a platform-enforced side-effect sandbox"),
         },
       });
+      const codeDocs = parseTextResult(await client.callTool({ name: "get_docs", arguments: { topic: "codeNodes" } }));
+      expect(codeDocs).toMatchObject({
+        codeNodes: {
+          globals: {
+            files: expect.stringContaining("files.download"),
+            "emit, state": expect.stringContaining("state"),
+          },
+        },
+      });
       expect(studioFetch).not.toHaveBeenCalled();
     } finally {
       await client.close();
@@ -70,7 +79,17 @@ describe("Streamable HTTP MCP endpoint", () => {
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
     expect(response.headers.get("access-control-allow-methods")).toContain("POST");
-    expect(response.headers.get("access-control-allow-headers")).toContain("x-project-id");
+    const allowedHeaders = response.headers.get("access-control-allow-headers") ?? "";
+    for (const header of [
+      "authorization",
+      "x-api-key",
+      "x-project-id",
+      "x-connection-id",
+      "mcp-session-id",
+      "mcp-protocol-version",
+    ]) {
+      expect(allowedHeaders).toContain(header);
+    }
   });
 
   it("adds CORS headers to unauthenticated responses", async () => {

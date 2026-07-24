@@ -16,4 +16,5 @@ alwaysApply: false
 - Characterize known gaps without asserting that the defect is desired behavior.
 - Pure workflow patch tests may import the minimal `applyWorkflowPatch` test seam. Do not extract tool domains solely to make them mockable.
 - Any test touching the remembered-`set_project` fallback must call the `__resetMemFallbackForTests` seam in setup/teardown — the module-scoped in-process map otherwise leaks state across tests in one process.
+- Redis-path project-selection tests must inject a deterministic `RememberedProjectRedis` with `__setRedisForTests` and restore it with `__resetRedisForTests`; never set real Redis credentials or contact live infrastructure.
 - Coverage should reveal unexercised endpoint behavior; never add tests that only duplicate TypeScript.
