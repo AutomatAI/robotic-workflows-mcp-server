@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetMemFallbackForTests,
@@ -159,6 +163,9 @@ const toolClassifications = {
   },
 } as const satisfies Record<string, ToolClassification>;
 
+const TOKEN_SELECTION_WARNING =
+  "All callers sharing this PAT also share this remembered project. Prefer explicit project_id/x-project-id, a stable connection_id, or a unique PAT per bare connector.";
+
 function createRedisFixture() {
   const values = new Map<string, string>();
   const get = vi.fn(async (key: string) => values.get(key) ?? null);
@@ -254,7 +261,7 @@ describe("registered tool contract", () => {
   it("keeps every classified Studio operation in the synchronized contract projection", () => {
     expect(studioContractProjection.contractId).toMatch(/^[a-z][a-z0-9-]*$/);
     expect(Number.isInteger(studioContractProjection.revision)).toBe(true);
-    expect(studioContractProjection.revision).toBeGreaterThan(0);
+    expect(studioContractProjection.revision).toBe(2);
 
     const operationIds = studioContractProjection.operations.map((operation) => operation.operationId);
     const operationKeys = studioContractProjection.operations.map(
@@ -264,12 +271,208 @@ describe("registered tool contract", () => {
     expect(new Set(operationKeys).size).toBe(operationKeys.length);
 
     const projected = new Set(operationKeys);
+    for (const operation of studioContractProjection.operations) {
+      expect(["none", "body", "query"], `${operation.operationId} requestLocation`).toContain(
+        operation.requestLocation,
+      );
+      expect(["read", "write", "authorship"], `${operation.operationId} wrapperTier`).toContain(operation.wrapperTier);
+      expect(operation.successStatus, `${operation.operationId} successStatus`).toBeGreaterThanOrEqual(100);
+      expect(operation.successStatus, `${operation.operationId} successStatus`).toBeLessThan(600);
+      expect(Array.isArray(operation.stableErrorCodes), `${operation.operationId} stableErrorCodes`).toBe(true);
+      expect(new Set(operation.stableErrorCodes).size).toBe(operation.stableErrorCodes.length);
+      if (operation.pagination !== null) {
+        expect(operation.requestLocation, `${operation.operationId} pagination location`).toBe("query");
+        expect(operation.pagination.style, `${operation.operationId} pagination style`).toBe("page_page_size");
+      }
+      if (operation.effectiveTier !== null) {
+        expect(operation.effectiveTier).toMatchObject({
+          tier: expect.stringMatching(/^(read|write|authorship)$/),
+          when: expect.any(String),
+        });
+      }
+    }
+
     for (const [tool, classification] of Object.entries(toolClassifications)) {
       if (classification.kind === "local") continue;
       for (const operation of classification.operations) {
         expect(projected.has(operation), `${tool} classified operation ${operation}`).toBe(true);
       }
     }
+
+    const byId = new Map(studioContractProjection.operations.map((operation) => [operation.operationId, operation]));
+    expect(byId.get("projects.list")).toMatchObject({
+      requestLocation: "query",
+      wrapperTier: "read",
+      successStatus: 200,
+      pagination: { request: { maxPageSize: 100 }, response: { items: "projects" } },
+    });
+    expect(byId.get("workflows.list")).toMatchObject({
+      requestLocation: "query",
+      wrapperTier: "read",
+      querySchema: {
+        properties: {
+          status: { enum: ["development", "preview", "active", "disabled"] },
+          search: { type: "string" },
+        },
+      },
+      pagination: { response: { items: "workflows" } },
+    });
+    expect(byId.get("workflows.create")).toMatchObject({
+      requestLocation: "body",
+      wrapperTier: "authorship",
+      successStatus: 201,
+      pagination: null,
+    });
+    expect(byId.get("workflows.get")).toMatchObject({
+      wrapperTier: "read",
+      effectiveTier: { tier: "authorship", when: expect.stringContaining("definition JSON") },
+    });
+    expect(byId.get("sessions.get_logs")).toMatchObject({
+      wrapperTier: "read",
+      successStatus: 404,
+    });
+    expect(byId.get("workflows.run")).toMatchObject({
+      requestLocation: "body",
+      wrapperTier: "write",
+      successStatus: 202,
+      pagination: null,
+      stableErrorCodes: ["workflow_not_found"],
+    });
+  });
+
+  it("projects a representative upstream Studio contract deterministically", () => {
+    const directory = mkdtempSync(join(tmpdir(), "automat-mcp-contract-"));
+    const upstreamSource = join(process.cwd(), "tests/fixtures/studio-programmatic-access-contract.json");
+    const reversedSource = join(directory, "reversed.json");
+    const script = join(process.cwd(), "scripts/sync-studio-contract.mjs");
+    try {
+      const upstream = JSON.parse(readFileSync(upstreamSource, "utf8"));
+      writeFileSync(
+        reversedSource,
+        JSON.stringify({
+          ...upstream,
+          operations: [...upstream.operations].reverse(),
+        }),
+      );
+
+      const first = execFileSync(process.execPath, [script, "--stdout", upstreamSource], {
+        encoding: "utf8",
+      });
+      const second = execFileSync(process.execPath, [script, "--stdout", reversedSource], {
+        encoding: "utf8",
+      });
+
+      expect(second).toBe(first);
+      expect(`${JSON.stringify(JSON.parse(first), null, 2)}\n`).toBe(first);
+      expect(JSON.parse(first)).toEqual({
+        contractId: "representative-studio-programmatic-access",
+        revision: 7,
+        operations: [
+          {
+            operationId: "projects.list",
+            method: "GET",
+            path: "/api/v1/projects",
+            requestLocation: "query",
+            querySchema: null,
+            wrapperTier: "read",
+            effectiveTier: null,
+            successStatus: 200,
+            pagination: expect.objectContaining({
+              style: "page_page_size",
+              request: expect.objectContaining({ maxPageSize: 100 }),
+            }),
+            stableErrorCodes: [],
+          },
+          {
+            operationId: "workflows.create",
+            method: "POST",
+            path: "/api/v1/projects/{projectId}/workflows",
+            requestLocation: "body",
+            querySchema: null,
+            wrapperTier: "authorship",
+            effectiveTier: null,
+            successStatus: 201,
+            pagination: null,
+            stableErrorCodes: ["workflow_name_conflict"],
+          },
+          {
+            operationId: "workflows.get",
+            method: "GET",
+            path: "/api/v1/projects/{projectId}/workflows/{workflowId}",
+            requestLocation: "query",
+            querySchema: {
+              properties: {
+                view: {
+                  enum: ["meta", "full", "graph", "node"],
+                  type: "string",
+                },
+              },
+              type: "object",
+            },
+            wrapperTier: "read",
+            effectiveTier: {
+              tier: "authorship",
+              when: "the response includes definition JSON",
+            },
+            successStatus: 200,
+            pagination: null,
+            stableErrorCodes: ["workflow_not_found"],
+          },
+        ],
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["requestLocation", "wrapperTier", "successStatus", "pagination", "stableErrorCodes"])(
+    "rejects an upstream operation missing required %s metadata",
+    (field) => {
+      const directory = mkdtempSync(join(tmpdir(), "automat-mcp-contract-invalid-"));
+      const sourcePath = join(directory, "missing-field.json");
+      const script = join(process.cwd(), "scripts/sync-studio-contract.mjs");
+      try {
+        const upstream = JSON.parse(
+          readFileSync(join(process.cwd(), "tests/fixtures/studio-programmatic-access-contract.json"), "utf8"),
+        );
+        delete upstream.operations[0][field];
+        writeFileSync(sourcePath, JSON.stringify(upstream));
+
+        expect(() =>
+          execFileSync(process.execPath, [script, "--stdout", sourcePath], {
+            encoding: "utf8",
+            stdio: "pipe",
+          }),
+        ).toThrow();
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("keeps project-selection docs and rules aligned without a server-issued session claim", () => {
+    const files = ["AGENTS.md", ".cursor/BUGBOT.md", ".cursor/rules/mcp-contract.md", "README.md", "RUBRIC.md"];
+    const contents = files.map((file) => [file, readFileSync(join(process.cwd(), file), "utf8")] as const);
+
+    for (const [file, content] of contents) {
+      expect(content, `${file} explicit selector precedence`).toMatch(
+        /project_id[\s\S]*x-project-id[\s\S]*(remembered )?`?set_project`?/i,
+      );
+      expect(content, `${file} token compatibility scope`).toMatch(/PAT-global|PAT-wide|token-only/i);
+      expect(content, `${file} no server-issued mcp-session-id claim`).not.toMatch(
+        /server[- ]issued[^.\n]*mcp-session-id|mcp-session-id[^.\n]*server[- ]issued/i,
+      );
+    }
+  });
+
+  it("keeps local Vercel startup outside the recursive framework dev script", () => {
+    const packageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
+    const readme = readFileSync(join(process.cwd(), "README.md"), "utf8");
+
+    expect(packageJson.scripts.dev).toBeUndefined();
+    expect(packageJson.scripts["dev:local"]).toBe("vercel dev");
+    expect(readme).toContain("pnpm run dev:local");
+    expect(readme).not.toContain("pnpm run dev          # vercel dev");
   });
 
   it("verifies recorded fixture requests against declared operations for a representative sample of tools", async () => {
@@ -697,9 +900,13 @@ describe("registered tool contract", () => {
     ]);
 
     try {
-      await Promise.all([
+      const selections = await Promise.all([
         clientA.callTool({ name: "set_project", arguments: { projectId: projectA } }),
         clientB.callTool({ name: "set_project", arguments: { projectId: projectB } }),
+      ]);
+      expect(selections.map(parseTextResult)).toEqual([
+        { projectId: projectA, validated: true, selectionScope: "connector" },
+        { projectId: projectB, validated: true, selectionScope: "connector" },
       ]);
       await Promise.all([
         clientB.callTool({ name: "list_workflows", arguments: {} }),
@@ -733,6 +940,8 @@ describe("registered tool contract", () => {
       expect(parseTextResult(await client.callTool({ name: "set_project", arguments: { projectId } }))).toEqual({
         projectId,
         validated: true,
+        selectionScope: "token",
+        warning: TOKEN_SELECTION_WARNING,
       });
 
       await client.callTool({ name: "list_workflows", arguments: {} });
@@ -740,6 +949,78 @@ describe("registered tool contract", () => {
       expect(workflowRequest?.url.pathname).toBe(`/api/v1/projects/${projectId}/workflows`);
     } finally {
       await client.close();
+    }
+  });
+
+  it("characterizes last-writer-wins selection for bare callers sharing one PAT", async () => {
+    const projectA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const projectB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const fixture = createStudioFetchFixture((request) =>
+      request.url.pathname === "/api/v1/projects"
+        ? jsonResponse({
+            projects: [
+              { id: projectA, name: "A" },
+              { id: projectB, name: "B" },
+            ],
+            currentPage: 1,
+            totalPages: 1,
+          })
+        : jsonResponse({ workflows: [], currentPage: 1, totalPages: 1 }),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client: first } = await connectTestClient({ projectId: null, apiKey: "pat_shared" });
+    const { client: second } = await connectTestClient({ projectId: null, apiKey: "pat_shared" });
+    try {
+      await first.callTool({ name: "set_project", arguments: { projectId: projectA } });
+      expect(
+        parseTextResult(await second.callTool({ name: "set_project", arguments: { projectId: projectB } })),
+      ).toEqual({
+        projectId: projectB,
+        validated: true,
+        selectionScope: "token",
+        warning: TOKEN_SELECTION_WARNING,
+      });
+
+      await first.callTool({ name: "list_workflows", arguments: {} });
+      expect(fixture.requests.at(-1)?.url.pathname).toBe(`/api/v1/projects/${projectB}/workflows`);
+    } finally {
+      await Promise.all([first.close(), second.close()]);
+    }
+  });
+
+  it("isolates connector-less remembered selections across unique PATs", async () => {
+    const projectA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const projectB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const fixture = createStudioFetchFixture((request) =>
+      request.url.pathname === "/api/v1/projects"
+        ? jsonResponse({
+            projects: [
+              { id: projectA, name: "A" },
+              { id: projectB, name: "B" },
+            ],
+            currentPage: 1,
+            totalPages: 1,
+          })
+        : jsonResponse({ workflows: [], currentPage: 1, totalPages: 1 }),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client: clientA } = await connectTestClient({ projectId: null, apiKey: "pat_unique_a" });
+    const { client: clientB } = await connectTestClient({ projectId: null, apiKey: "pat_unique_b" });
+    try {
+      await clientA.callTool({ name: "set_project", arguments: { projectId: projectA } });
+      await clientB.callTool({ name: "set_project", arguments: { projectId: projectB } });
+      await clientA.callTool({ name: "list_workflows", arguments: {} });
+      await clientB.callTool({ name: "list_workflows", arguments: {} });
+
+      const workflowPaths = fixture.requests
+        .filter((request) => request.url.pathname.endsWith("/workflows"))
+        .map((request) => request.url.pathname);
+      expect(workflowPaths).toEqual([
+        `/api/v1/projects/${projectA}/workflows`,
+        `/api/v1/projects/${projectB}/workflows`,
+      ]);
+    } finally {
+      await Promise.all([clientA.close(), clientB.close()]);
     }
   });
 
@@ -960,7 +1241,7 @@ describe("registered tool contract", () => {
           arguments: { projectId: selectedProject },
         }),
       ),
-    ).toEqual({ projectId: selectedProject, validated: true });
+    ).toEqual({ projectId: selectedProject, validated: true, selectionScope: "connector" });
     await setter.close();
 
     const { client: selectedClient } = await connectTestClient({
@@ -1017,7 +1298,7 @@ describe("registered tool contract", () => {
           arguments: { projectId: selectedProject },
         }),
       ),
-    ).toEqual({ projectId: selectedProject, validated: true });
+    ).toEqual({ projectId: selectedProject, validated: true, selectionScope: "connector" });
     await setter.close();
     expect(redisFixture.set).toHaveBeenCalledOnce();
 

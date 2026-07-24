@@ -4,7 +4,8 @@ import { resolve } from "node:path";
 const OUTPUT_PATH = resolve("contracts/studio-programmatic-access-operations.json");
 const args = process.argv.slice(2);
 const check = args.includes("--check");
-const sourceArg = args.find((arg) => arg !== "--check" && arg !== "--");
+const stdout = args.includes("--stdout");
+const sourceArg = args.find((arg) => arg !== "--check" && arg !== "--stdout" && arg !== "--");
 
 if (!sourceArg) {
   throw new Error(
@@ -28,6 +29,16 @@ if (!Array.isArray(source.operations)) {
 
 const operationIds = new Set();
 const operationKeys = new Set();
+const canonicalize = (value) => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, canonicalize(nested)]),
+  );
+};
+
 const operations = source.operations.map((operation, index) => {
   if (
     typeof operation.operationId !== "string" ||
@@ -46,6 +57,41 @@ const operations = source.operations.map((operation, index) => {
       );
     }
   }
+  if (typeof operation.requestLocation !== "string" || operation.requestLocation.length === 0) {
+    throw new Error(`Studio operation ${operation.operationId} has an invalid requestLocation.`);
+  }
+  if (typeof operation.wrapperTier !== "string" || operation.wrapperTier.length === 0) {
+    throw new Error(`Studio operation ${operation.operationId} has an invalid wrapperTier.`);
+  }
+  if (
+    operation.effectiveTier !== undefined &&
+    operation.effectiveTier !== null &&
+    (typeof operation.effectiveTier !== "object" || Array.isArray(operation.effectiveTier))
+  ) {
+    throw new Error(`Studio operation ${operation.operationId} has an invalid effectiveTier.`);
+  }
+  if (!Number.isInteger(operation.successStatus) || operation.successStatus < 100 || operation.successStatus > 599) {
+    throw new Error(`Studio operation ${operation.operationId} has an invalid successStatus.`);
+  }
+  if (
+    operation.pagination !== null &&
+    (typeof operation.pagination !== "object" || Array.isArray(operation.pagination))
+  ) {
+    throw new Error(`Studio operation ${operation.operationId} has invalid pagination metadata.`);
+  }
+  if (
+    operation.querySchema !== undefined &&
+    operation.querySchema !== null &&
+    (typeof operation.querySchema !== "object" || Array.isArray(operation.querySchema))
+  ) {
+    throw new Error(`Studio operation ${operation.operationId} has an invalid querySchema.`);
+  }
+  if (
+    !Array.isArray(operation.stableErrorCodes) ||
+    operation.stableErrorCodes.some((code) => typeof code !== "string" || code.length === 0)
+  ) {
+    throw new Error(`Studio operation ${operation.operationId} has invalid stableErrorCodes.`);
+  }
 
   const key = `${operation.method} ${operation.path}`;
   if (operationIds.has(operation.operationId)) {
@@ -61,6 +107,13 @@ const operations = source.operations.map((operation, index) => {
     operationId: operation.operationId,
     method: operation.method,
     path: operation.path,
+    requestLocation: operation.requestLocation,
+    querySchema: canonicalize(operation.querySchema ?? null),
+    wrapperTier: operation.wrapperTier,
+    effectiveTier: canonicalize(operation.effectiveTier ?? null),
+    successStatus: operation.successStatus,
+    pagination: canonicalize(operation.pagination),
+    stableErrorCodes: [...operation.stableErrorCodes].sort(),
   };
 });
 
@@ -76,7 +129,9 @@ const projection = {
 };
 const serialized = `${JSON.stringify(projection, null, 2)}\n`;
 
-if (check) {
+if (stdout) {
+  process.stdout.write(serialized);
+} else if (check) {
   const current = await readFile(OUTPUT_PATH, "utf8");
   if (current !== serialized) {
     throw new Error(`Studio contract projection is stale. Run: pnpm run contract:sync -- ${sourceArg}`);

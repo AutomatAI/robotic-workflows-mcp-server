@@ -1,191 +1,777 @@
 {
   "contractId": "automat-studio-programmatic-access",
-  "revision": 1,
+  "revision": 2,
   "operations": [
     {
       "operationId": "extractors.create",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/extractors"
+      "path": "/api/v1/projects/{projectId}/extractors",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 201,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "extractors.delete",
       "method": "DELETE",
-      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}"
+      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "extractors.get",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}"
+      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "extractors.list",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/extractors"
+      "path": "/api/v1/projects/{projectId}/extractors",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "search": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 50,
+          "maxPageSize": 200,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "extractors",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "extractors.run",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}/run"
+      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}/run",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "write",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": [
+        "extractor_not_found"
+      ]
     },
     {
       "operationId": "extractors.update",
       "method": "PATCH",
-      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}"
+      "path": "/api/v1/projects/{projectId}/extractors/{extractorId}",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "hitl.complete_task",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/hitl/tasks/{taskId}/complete"
+      "path": "/api/v1/projects/{projectId}/hitl/tasks/{taskId}/complete",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "write",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": [
+        "hitl_task_not_found"
+      ]
     },
     {
       "operationId": "hitl.list_tasks",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/hitl/tasks"
+      "path": "/api/v1/projects/{projectId}/hitl/tasks",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "sessionId": {
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "responded",
+              "expired",
+              "canceled"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 50,
+          "maxPageSize": 200,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "tasks",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "projects.list",
       "method": "GET",
-      "path": "/api/v1/projects"
+      "path": "/api/v1/projects",
+      "requestLocation": "query",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 50,
+          "maxPageSize": 100,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "projects",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "resources.create",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/resources"
+      "path": "/api/v1/projects/{projectId}/resources",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 201,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "resources.delete",
       "method": "DELETE",
-      "path": "/api/v1/projects/{projectId}/resources/{resourceId}"
+      "path": "/api/v1/projects/{projectId}/resources/{resourceId}",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "resources.get",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/resources/{resourceId}"
+      "path": "/api/v1/projects/{projectId}/resources/{resourceId}",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "resources.list",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/resources"
+      "path": "/api/v1/projects/{projectId}/resources",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "lifecycle": {
+            "enum": [
+              "development",
+              "preview",
+              "active",
+              ""
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 100,
+          "maxPageSize": 500,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "resources",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "resources.put",
       "method": "PUT",
-      "path": "/api/v1/projects/{projectId}/resources/{resourceId}"
+      "path": "/api/v1/projects/{projectId}/resources/{resourceId}",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "schedules.create",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 201,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "schedules.delete",
       "method": "DELETE",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules/{scheduleId}"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules/{scheduleId}",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "schedules.list",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules",
+      "requestLocation": "query",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 50,
+          "maxPageSize": 200,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "schedules",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "schedules.update",
       "method": "PATCH",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules/{scheduleId}"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/schedules/{scheduleId}",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "schema.get_workflow",
       "method": "GET",
-      "path": "/api/v1/schema"
+      "path": "/api/v1/schema",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "runtimeVersion": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": [
+        "schema_conversion_unavailable"
+      ]
     },
     {
       "operationId": "secrets.delete",
       "method": "DELETE",
-      "path": "/api/v1/projects/{projectId}/secrets/{secretName}"
+      "path": "/api/v1/projects/{projectId}/secrets/{secretName}",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "config": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "project": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "config"
+        ],
+        "type": "object"
+      },
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "secrets.list_names",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/secrets"
+      "path": "/api/v1/projects/{projectId}/secrets",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "config": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "config"
+        ],
+        "type": "object"
+      },
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 100,
+          "maxPageSize": 500,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "secrets",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "secrets.put",
       "method": "PUT",
-      "path": "/api/v1/projects/{projectId}/secrets/{secretName}"
+      "path": "/api/v1/projects/{projectId}/secrets/{secretName}",
+      "requestLocation": "body",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "config": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "project": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "config"
+        ],
+        "type": "object"
+      },
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "sessions.get",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}"
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "sessions.get_logs",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/logs"
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/logs",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 404,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "sessions.list",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/sessions"
+      "path": "/api/v1/projects/{projectId}/sessions",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "status": {
+            "enum": [
+              "pending",
+              "queued",
+              "executing",
+              "paused",
+              "completed",
+              "failed",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "workflowId": {
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 50,
+          "maxPageSize": 200,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "sessions",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "sessions.list_nodes",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/nodes"
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/nodes",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "sessions.stop",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/stop"
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/stop",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "write",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "versions.get",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions/{versionId}"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions/{versionId}",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": {
+        "tier": "authorship",
+        "when": "the response includes definition JSON"
+      },
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "versions.list",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions",
+      "requestLocation": "query",
+      "querySchema": null,
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 50,
+          "maxPageSize": 200,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "versions",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "versions.revert",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions/{versionId}/revert"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/versions/{versionId}/revert",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "workflows.create",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/workflows"
+      "path": "/api/v1/projects/{projectId}/workflows",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 201,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "workflows.delete",
       "method": "DELETE",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
+      "requestLocation": "none",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "workflows.get",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "if": {
+          "properties": {
+            "view": {
+              "const": "node"
+            }
+          },
+          "required": [
+            "view"
+          ]
+        },
+        "properties": {
+          "nodeName": {
+            "type": "string"
+          },
+          "view": {
+            "default": "full",
+            "enum": [
+              "meta",
+              "full",
+              "graph",
+              "node"
+            ],
+            "type": "string"
+          }
+        },
+        "then": {
+          "properties": {
+            "nodeName": {
+              "minLength": 1
+            }
+          },
+          "required": [
+            "nodeName"
+          ]
+        },
+        "type": "object"
+      },
+      "wrapperTier": "read",
+      "effectiveTier": {
+        "tier": "authorship",
+        "when": "view is omitted (defaults to full), full, or node because the response includes definition JSON"
+      },
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "workflows.list",
       "method": "GET",
-      "path": "/api/v1/projects/{projectId}/workflows"
+      "path": "/api/v1/projects/{projectId}/workflows",
+      "requestLocation": "query",
+      "querySchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "search": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "development",
+              "preview",
+              "active",
+              "disabled"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "wrapperTier": "read",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": {
+        "request": {
+          "defaultPageSize": 50,
+          "maxPageSize": 200,
+          "page": "page",
+          "pageSize": "pageSize"
+        },
+        "response": {
+          "currentPage": "currentPage",
+          "items": "workflows",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages"
+        },
+        "style": "page_page_size"
+      },
+      "stableErrorCodes": []
     },
     {
       "operationId": "workflows.put_definition",
       "method": "PUT",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     },
     {
       "operationId": "workflows.run",
       "method": "POST",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/run"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}/run",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "write",
+      "effectiveTier": null,
+      "successStatus": 202,
+      "pagination": null,
+      "stableErrorCodes": [
+        "workflow_not_found"
+      ]
     },
     {
       "operationId": "workflows.update",
       "method": "PATCH",
-      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}"
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
+      "requestLocation": "body",
+      "querySchema": null,
+      "wrapperTier": "authorship",
+      "effectiveTier": null,
+      "successStatus": 200,
+      "pagination": null,
+      "stableErrorCodes": []
     }
   ]
 }
