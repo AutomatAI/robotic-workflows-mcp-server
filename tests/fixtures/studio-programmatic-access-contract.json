@@ -1,0 +1,118 @@
+{
+  "contractId": "representative-studio-programmatic-access",
+  "revision": 7,
+  "compatibilityPolicy": {
+    "revision": 7,
+    "wireNamespace": "/api/v1"
+  },
+  "domains": [
+    {
+      "domain": "projects",
+      "decision": "exposed"
+    },
+    {
+      "domain": "workflows",
+      "decision": "exposed"
+    }
+  ],
+  "operations": [
+    {
+      "operationId": "projects.list",
+      "domain": "projects",
+      "summary": "List projects available to the token",
+      "method": "GET",
+      "path": "/api/v1/projects",
+      "authModel": "pat",
+      "wrapperTier": "read",
+      "projectScope": "token_allowlist",
+      "requestSchemaPresence": "partial",
+      "requestLocation": "query",
+      "responseMaturity": "inventory",
+      "successStatus": 200,
+      "pagination": {
+        "style": "page_page_size",
+        "request": {
+          "page": "page",
+          "pageSize": "pageSize",
+          "defaultPageSize": 50,
+          "maxPageSize": 100
+        },
+        "response": {
+          "items": "projects",
+          "totalItems": "totalItems",
+          "totalPages": "totalPages",
+          "currentPage": "currentPage"
+        }
+      },
+      "retry": {
+        "classification": "safe"
+      },
+      "sideEffects": [],
+      "stableErrorCodes": [],
+      "querySchema": null
+    },
+    {
+      "operationId": "workflows.create",
+      "domain": "workflows",
+      "summary": "Create a workflow",
+      "method": "POST",
+      "path": "/api/v1/projects/{projectId}/workflows",
+      "authModel": "pat",
+      "wrapperTier": "authorship",
+      "projectScope": "path",
+      "requestSchemaPresence": "complete",
+      "requestLocation": "body",
+      "responseMaturity": "request_complete",
+      "successStatus": 201,
+      "pagination": null,
+      "retry": {
+        "classification": "unsafe"
+      },
+      "sideEffects": ["create workflow"],
+      "stableErrorCodes": ["workflow_name_conflict"],
+      "requestSchema": {
+        "type": "object",
+        "properties": {
+          "definition": {
+            "type": "object"
+          }
+        },
+        "required": ["definition"]
+      },
+      "querySchema": null
+    },
+    {
+      "operationId": "workflows.get",
+      "domain": "workflows",
+      "summary": "Read a workflow projection",
+      "method": "GET",
+      "path": "/api/v1/projects/{projectId}/workflows/{workflowId}",
+      "authModel": "pat",
+      "wrapperTier": "read",
+      "effectiveTier": {
+        "tier": "authorship",
+        "when": "the response includes definition JSON"
+      },
+      "projectScope": "path",
+      "requestSchemaPresence": "complete",
+      "requestLocation": "query",
+      "responseMaturity": "inventory",
+      "successStatus": 200,
+      "pagination": null,
+      "retry": {
+        "classification": "safe"
+      },
+      "sideEffects": [],
+      "stableErrorCodes": ["workflow_not_found"],
+      "querySchema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "enum": ["meta", "full", "graph", "node"]
+          }
+        }
+      }
+    }
+  ]
+}

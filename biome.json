@@ -23,6 +23,12 @@
       "formatter": {
         "enabled": false
       }
+    },
+    {
+      "includes": ["contracts/studio-programmatic-access-operations.json"],
+      "formatter": {
+        "enabled": false
+      }
     }
   ]
 }

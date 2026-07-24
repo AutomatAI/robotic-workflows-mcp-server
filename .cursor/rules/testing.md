@@ -1,6 +1,6 @@
 ---
-globs: ["tests/**/*.ts", "vitest.config.ts"]
-paths: ["tests/**/*.ts", "vitest.config.ts"]
+globs: ["tests/**/*.ts", "tests/fixtures/**", "vitest.config.ts"]
+paths: ["tests/**/*.ts", "tests/fixtures/**", "vitest.config.ts"]
 alwaysApply: false
 ---
 
@@ -17,4 +17,6 @@ alwaysApply: false
 - Pure workflow patch tests may import the minimal `applyWorkflowPatch` test seam. Do not extract tool domains solely to make them mockable.
 - Any test touching the remembered-`set_project` fallback must call the `__resetMemFallbackForTests` seam in setup/teardown — the module-scoped in-process map otherwise leaks state across tests in one process.
 - Redis-path project-selection tests must inject a deterministic `RememberedProjectRedis` with `__setRedisForTests` and restore it with `__resetRedisForTests`; never set real Redis credentials or contact live infrastructure.
+- Project-selection tests must characterize connector-scoped results, token-scoped warnings, shared-PAT behavior, explicit-selector precedence, and unique-PAT isolation without implying this endpoint supplies `mcp-session-id`.
+- Contract projection tests must validate the committed metadata offline and prove synchronization output is deterministic without reading a sibling Studio checkout.
 - Coverage should reveal unexercised endpoint behavior; never add tests that only duplicate TypeScript.

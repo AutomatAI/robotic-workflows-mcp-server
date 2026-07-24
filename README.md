@@ -51,9 +51,9 @@ Streamable HTTP, stateless. The Vercel default URL (`https://robotic-workflows-m
 
 Replace `pat_…` with your personal access token. A PAT spans every project you can access, so a target project must be selected. Resolution is deterministic: `project_id` query → `x-project-id` header → remembered `set_project` selection → `STUDIO_DEFAULT_PROJECT_ID`. Explicit connection selectors therefore stay pinned even if `set_project` was called.
 
-For a one-shot/stateless caller with no durable connection, skip `set_project` entirely — just always pass `project_id` / `x-project-id` explicitly, since that already takes precedence. For a caller that keeps calling the same connector repeatedly, `set_project` remembers the selection for that PAT; add a stable `connection_id` query parameter (or `x-connection-id` header) if multiple separate connectors share one PAT, so their selections don't collide (this endpoint is stateless Streamable HTTP with no `sessionIdGenerator`, so it never issues an `Mcp-Session-Id` — do not rely on one being sent automatically). Without a connector id, the remembered selection is shared by every caller of that token. Connections pinned with `project_id` / `x-project-id` need no connector id. Secrets tools additionally need the Doppler identifiers (`dopplerProject`/`dopplerConfig` tool inputs, or `STUDIO_DOPPLER_PROJECT`/`STUDIO_DOPPLER_CONFIG`).
+For a one-shot/stateless caller with no durable connection, skip `set_project` entirely and always pass `project_id` / `x-project-id`; this is the safest migration target and already takes precedence. For a recurring connector, `set_project` uses token+connector isolation when the caller supplies a stable `connection_id` query parameter, `x-connection-id` header, or `mcp-session-id` header. Treat `mcp-session-id` as caller-supplied identity; do not assume this stateless endpoint supplies one. Only when none of those identities is present does compatibility behavior use a PAT-global remembered bucket. Every bare caller sharing that PAT then shares one selection, so use a unique PAT per bare connector to prevent collisions. Connections pinned with `project_id` / `x-project-id` need no connector id. Secrets tools additionally need the Doppler identifiers (`dopplerProject`/`dopplerConfig` tool inputs, or `STUDIO_DOPPLER_PROJECT`/`STUDIO_DOPPLER_CONFIG`).
 
-**Token tiers:** read tokens list/inspect (no definition JSON — `read_workflow` `full`/`node` need an authorship-tier PAT; `graph` degrades gracefully); write tokens also run workflows / stop sessions / complete HITL tasks; workflow, schedule, secret, and resource mutations need authorship (author role + write token). Tier ledger: studio `docs/PROGRAMMATIC_ACCESS.md`.
+**Token tiers:** read tokens list/inspect most domains (no definition JSON — `read_workflow` `full`/`node` need an authorship-tier PAT; `graph` degrades gracefully); write tokens also run workflows / stop sessions / complete HITL tasks; workflow and schedule mutations need authorship. `list_versions`, `list_secrets`, and every resource control-plane tool—list, get, test, create, update, and delete—also require authorship (author role + write token). Secret set/delete remain authorship-tier as well. Tier ledger: studio `docs/PROGRAMMATIC_ACCESS.md`.
 
 ## Workflow lifecycle policy (for agents)
 
@@ -92,7 +92,7 @@ pnpm run inspector
 
 ```bash
 pnpm install
-pnpm run dev          # vercel dev → http://localhost:3000/api/mcp
+pnpm run dev:local    # pinned Vercel CLI → http://localhost:3000/api/mcp
 pnpm run inspector    # MCP Inspector
 pnpm run verify       # typecheck, lint, format check, and tests with coverage
 pnpm run deploy       # deploy (requires vercel login)
@@ -110,11 +110,18 @@ pnpm run contract:sync -- /path/to/studio/docs/generated/programmatic-access-con
 pnpm run contract:check -- /path/to/studio/docs/generated/programmatic-access-contract.json
 ```
 
-Commit the compact projection with any mapping changes. The sync rejects
-duplicate operation ids/method+path keys, malformed contract metadata, and
-query-location operations that still use `requestSchema`; standardized query
-operations use `querySchema` when they have a non-pagination query schema.
-`pnpm run verify` remains fully offline by testing the committed projection.
+Commit the compact projection with any mapping changes. It retains the contract
+id/revision plus each operation's id, method, path, request location, query
+schema, wrapper/effective tier, success status, pagination, and stable error
+codes. The sync rejects duplicate ids/method+path keys, malformed metadata, and
+query-location operations that still use `requestSchema`; output is sorted and
+deterministic.
+
+`pnpm run verify` remains fully offline: it validates the committed projection's
+structure, internal consistency, and MCP assumptions, but cannot prove that the
+file matches the latest Studio artifact without a source. Upstream freshness
+remains the A8 automation dependency. During handoff, run the explicit
+`contract:check -- <path>` command above against the intended Studio contract.
 
 ## Stack
 
@@ -150,13 +157,13 @@ coverage, not a claim that every tool behavior or Studio capability is exhaustiv
 ### `list_projects`
 Discovery — the projects this token can access (allowlist-scoped tokens see only their allowlist). Use it to pick a `set_project` target.
 - Input: `{ limit?, cursor? }`
-- Output: `{ items: [{ projectId, name }], nextCursor }`
+- Output: `{ items: [{ projectId, name }], nextCursor, projectSelection }`; the bounded guidance names explicit selectors, connector-scoped `set_project`, and the shared token-scope caveat.
 - → `GET /api/v1/projects` (the one project-agnostic list)
 
 ### `set_project`
-Selects the target Studio project for subsequent calls from the same logical connector — **call first** when the connection has no explicit project selector. Validates the id against the `list_projects` discovery listing. The selection persists in Upstash when configured; otherwise it is process-local. Explicit `project_id` / `x-project-id` selectors take precedence.
+Selects the target Studio project after validating the id against `list_projects`. Explicit `project_id` / `x-project-id` selectors take precedence. With `connection_id`, `x-connection-id`, or caller-supplied `mcp-session-id`, the remembered bucket is isolated by PAT + connector. Only connector-less callers use the compatibility PAT-global bucket, shared by all callers using that PAT.
 - Input: `{ projectId }` (UUID — discover via `list_projects`)
-- Output: `{ projectId, validated: true }`
+- Output: `{ projectId, validated: true, selectionScope: 'connector' | 'token', warning? }`; token scope includes a bounded collision warning, while connector scope does not.
 - → validates via `GET /api/v1/projects`
 
 ### `get_docs`
@@ -233,7 +240,7 @@ Authoring guide — **call first**. How to write `code`/`decision` nodes: global
 
 ### `list_versions`
 - Input: `{ workflowId, limit?, cursor?, named?, source? }`
-- Output: `{ items: [{ versionId, versionNumber, name, source, createdAt }], nextCursor, activeVersionId }` → `GET /api/v1/projects/{projectId}/workflows/{id}/versions`
+- Output: `{ items: [{ versionId, versionNumber, name, source, createdAt }], nextCursor, activeVersionId }` → `GET /api/v1/projects/{projectId}/workflows/{id}/versions` · authorship-tier PAT required
 
 ### `get_version`
 - Input: `{ workflowId, versionId }` · Output: `{ versionId, versionNumber, name, source, createdAt, definition }` → `GET …/versions/{versionId}`
@@ -292,7 +299,7 @@ All schedules run in **UTC**. A workflow may have many; run input comes from a l
 Project-scoped. Values are never returned.
 
 ### `list_secrets`
-- Input: `{ lifecycle?, limit?, cursor? }` · Output: `{ items: [{ key, last4, lifecycle, updatedAt }], nextCursor }`
+- Input: `{ dopplerProject?, dopplerConfig?, limit?, cursor? }` · Output: `{ items: [{ key }], dopplerConfigured, nextCursor }` · authorship-tier PAT required; values are never returned
 
 ### `set_secrets`
 - Input: `{ secrets: [{ key, value }], dopplerProject?, dopplerConfig? }` · Output: `{ updated: [keys] }` · name-keyed PUT. If the current write errors, only prior acknowledgements appear in `updated`; `partialResult` reports `{ attemptedKey, outcome:'unknown', remainingKeys }` and never secret values.
@@ -302,19 +309,22 @@ Project-scoped. Values are never returned.
 
 ## Resources
 
-Data resources, referenced by name from `block`/`document` nodes and schedule inputs. Each has a `lifecycle` (development | preview | active).
+The PAT surface is the environment control plane for data resources; project files are separate. `source` controls behavior: `manual` is operator-managed, `api` may refresh from `config.url`, and `workflow` may be written by running code. Values written through this façade can therefore be overwritten later for API/workflow sources. Prefer stable `resourceId`; name/lifecycle lookup is a bounded, potentially racy convenience.
 
 ### `list_resources`
-- Input: `{ lifecycle?, search?, limit?, cursor? }` · Output: `{ items: [{ resourceId, name, kind, description, lifecycle, updatedAt }], nextCursor, truncated? }`
+- Input: `{ lifecycle?, search?, limit?, cursor? }` · Output: `{ items: [{ resourceId, name, kind:'data', description, value, source, config, lifecycle, lastFetchedAt, createdAt, updatedAt }], nextCursor, truncated? }`. `config` is populated only for API resources and is otherwise `null`.
 
 ### `get_resource`
-- Input: `{ resourceId }` or `{ name, lifecycle? }` · Output: `{ resourceId, name, kind: 'data', value, description, lifecycle, updatedAt }`. A unique name-only match succeeds; multiple lifecycle rows return `conflict` and require `lifecycle` or `resourceId`.
+- Input: `{ resourceId }` or `{ name, lifecycle? }` · Output: the normalized full data-resource shape above. A unique name-only match succeeds; multiple lifecycle rows return `conflict` and require `lifecycle` or `resourceId`.
 
 ### `set_resource`
-- Input: `{ resourceId, value, description? }` to replace one row, `{ name, lifecycle, value, description? }` to upsert one stage, or `{ name, value, description? }` for compatibility name-only behavior. Name-only performs a complete bounded lookup: update one unique row, return `conflict` for multiple lifecycle rows, or create and seed all stages when absent. Outputs normalized `resourceId` fields. File-resource uploads are not supported.
+- Input: `{ resourceId, value, source?, config?, description? }` to update one row, `{ name, lifecycle?, value, source?, config?, description? }` for compatibility upsert behavior. Create defaults `source` to `manual`; accepted sources are `manual | api | workflow`. API source requires strict `config:{ url, schedule? }`; Studio validates source/config combinations. Update sends the full value plus supplied source/config/description and never moves lifecycle. Name-only performs a complete bounded lookup: update one unique row, conflict on multiple lifecycle rows, or create when absent. Output is the normalized full shape. File resources are not supported here.
 
 ### `delete_resource`
-- Input: `{ resourceId }` or `{ name, lifecycle? }` · Output: `{ success: true, resourceId }`. Name-only follows the same unique-or-conflict rule as `get_resource`.
+- Input: `{ resourceId }` or `{ name, lifecycle? }` · Output: `{ success: true, resourceId }`. Deletes manual, API, and workflow data resources. Name-only follows the same unique-or-conflict rule as `get_resource`.
+
+### `test_resource_api`
+- Input: `{ url }` · Output: `{ value }` · → `POST /api/v1/projects/{projectId}/resources/test-fetch`. Performs an external fetch through Studio's resource rules without persisting a resource.
 
 ## Extractors
 

@@ -152,6 +152,14 @@ describe("Streamable HTTP MCP endpoint", () => {
       expect(parseTextResult(called)).toEqual({
         items: [{ projectId: "project-1", name: "Test project" }],
         nextCursor: null,
+        projectSelection: {
+          explicit:
+            "Safest: send project_id on the URL or x-project-id on every call; explicit selectors take precedence.",
+          connector:
+            "For remembered selection, call set_project with connection_id, x-connection-id, or a client-supplied mcp-session-id.",
+          tokenCaveat:
+            "Without connector identity, set_project uses token scope and all callers sharing this PAT share one selection.",
+        },
       });
       expect(called).not.toHaveProperty("structuredContent");
       expect(called).not.toHaveProperty("isError");

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { Redis } from "@upstash/redis";
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
+import studioContractProjection from "../contracts/studio-programmatic-access-operations.json" with { type: "json" };
 import packageJson from "../package.json" with { type: "json" };
 
 /**
@@ -12,11 +13,10 @@ import packageJson from "../package.json" with { type: "json" };
  * to the studio public v1 API under /api/v1/projects/{projectId}/..., authenticating
  * with a Personal Access Token (pat_...) that acts as its owning user.
  *
- * Because a PAT spans every project its user can access, the target project can
- * no longer be resolved from the credential — it is CONNECTION-scoped: pass
- * `?project_id=<uuid>` on the MCP URL (or the `x-project-id` header, or set
- * STUDIO_DEFAULT_PROJECT_ID on the server). To work across multiple projects,
- * register the connector once per project.
+ * Because a PAT spans every project its user can access, target selection uses
+ * explicit selectors first, then remembered state. Remembered state is isolated
+ * by token + logical connector identity when one is supplied; connector-less
+ * callers retain a compatibility token-wide bucket.
  *
  * Contract reference: README.md (Tools section).
  */
@@ -47,12 +47,10 @@ const studioDefaultProjectId = () => process.env.STUDIO_DEFAULT_PROJECT_ID || un
 // This endpoint runs in STATELESS Streamable HTTP mode (no sessionIdGenerator
 // configured), so mcp-handler never issues an Mcp-Session-Id — ordinary
 // connectors that just point at the base MCP URL will never have one to send.
-// Requiring connector identity would therefore fail `set_project` for nearly
-// every real caller, so the bucket falls back to a PAT-global scope when no
-// connector identity is present, exactly like the sole-tenant case where one
-// PAT belongs to one connector. Connector-scoped isolation (distinct
-// connection_id/x-connection-id per connector) remains available and
-// recommended when multiple connectors share one PAT. The server is a
+// The bucket falls back to a PAT-global compatibility scope only when no
+// connector identity is present. Connector-scoped isolation (distinct
+// connection_id/x-connection-id/mcp-session-id values per connector) remains
+// recommended whenever multiple connectors share one PAT. The server is a
 // stateless, multi-instance serverless function, so an in-process value can't
 // survive across requests — the shared store is what lets `set_project` stick
 // between calls and across cold starts. Precedence: ?project_id= >
@@ -63,6 +61,16 @@ const studioDefaultProjectId = () => process.env.STUDIO_DEFAULT_PROJECT_ID || un
 // a single stdio process) — there the Map genuinely persists for the process.
 const REMEMBERED_PROJECT_TTL_S = 6 * 60 * 60; // 6h
 const projectKey = (bucket: string) => `pat:project:${bucket}`;
+const TOKEN_SELECTION_WARNING =
+  "All callers sharing this PAT also share this remembered project. Prefer explicit project_id/x-project-id, a stable connection_id, or a unique PAT per bare connector.";
+const PROJECT_SELECTION_GUIDANCE = {
+  explicit:
+    "Safest: send project_id on the URL or x-project-id on every call; explicit selectors take precedence.",
+  connector:
+    "For remembered selection, call set_project with connection_id, x-connection-id, or a client-supplied mcp-session-id.",
+  tokenCaveat:
+    "Without connector identity, set_project uses token scope and all callers sharing this PAT share one selection.",
+} as const;
 
 export interface RememberedProjectRedis {
   get<T>(key: string): Promise<T | null>;
@@ -119,7 +127,7 @@ async function rememberedProjectId(): Promise<string | undefined> {
       const remembered = (await redis.get<string>(projectKey(bucket))) ?? undefined;
       if (remembered) return remembered;
     } catch {
-      // Fall through to the connector-scoped in-process fallback.
+      // Fall through to the same-scope in-process fallback.
     }
   }
   const entry = memFallback.get(bucket);
@@ -147,8 +155,8 @@ async function rememberProject(projectId: string): Promise<void> {
       rememberProjectInMemory(bucket, projectId);
       return;
     } catch {
-      // Keep this connector usable on the current instance. The key remains
-      // token+connector scoped, so another logical connector cannot inherit it.
+      // Keep this selection usable on the current instance. The bucket keeps
+      // the same connector-or-token scope selected by tokenBucket().
     }
   }
   rememberProjectInMemory(bucket, projectId);
@@ -193,6 +201,12 @@ class ApiError extends Error {
     super(message);
   }
 }
+
+const STUDIO_STABLE_ERROR_CODES = new Set(
+  studioContractProjection.operations.flatMap((operation) =>
+    "stableErrorCodes" in operation ? operation.stableErrorCodes : [],
+  ),
+);
 
 interface ApiOpts {
   query?: Record<string, unknown>;
@@ -275,8 +289,9 @@ async function api(method: string, path: string, opts: ApiOpts = {}): Promise<an
     }
   }
   if (!res.ok) {
-    const apiCode = data?.error || `http_${res.status}`;
-    const message = data?.message || data?.error || text || res.statusText;
+    const apiCode = data?.code ?? data?.error ?? `http_${res.status}`;
+    const message =
+      res.status >= 500 ? "Studio request failed." : data?.message || data?.error || res.statusText || "Studio request failed.";
     throw new ApiError(res.status, String(apiCode), String(message), data?.issues);
   }
   return data;
@@ -292,18 +307,19 @@ const result = (data: Record<string, unknown>) => ({
 function ourCode(status: number, apiCode?: string): string {
   if (
     apiCode &&
-    [
-      "not_found",
-      "validation_failed",
-      "version_conflict",
-      "conflict",
-      "lifecycle_gated",
-      "forbidden",
-      "bad_request",
-      "rate_limited",
-      "unauthorized",
-      "internal_error",
-    ].includes(apiCode)
+    ([
+        "not_found",
+        "validation_failed",
+        "version_conflict",
+        "conflict",
+        "lifecycle_gated",
+        "forbidden",
+        "bad_request",
+        "rate_limited",
+        "unauthorized",
+        "internal_error",
+      ].includes(apiCode) ||
+      STUDIO_STABLE_ERROR_CODES.has(apiCode))
   ) {
     return apiCode;
   }
@@ -477,6 +493,13 @@ export function applyWorkflowPatch(current: any, patch: any): any {
 const WorkflowStatus = z.enum(["development", "preview", "active", "disabled"]);
 const RunStatus = z.enum(["pending", "queued", "executing", "paused", "completed", "failed", "canceled"]);
 const Lifecycle = z.enum(["development", "preview", "active"]);
+const ResourceSource = z.enum(["manual", "api", "workflow"]);
+const ResourceApiConfig = z
+  .object({
+    url: z.string().url(),
+    schedule: z.string().min(1).optional(),
+  })
+  .strict();
 // Shared, concise execution model — folded into the definition/patch param
 // descriptions so an agent can author nodes without a separate get_workflow_schema
 // call (which remains the full reference). Kept tight to respect the ~2KB budget.
@@ -524,6 +547,8 @@ const DOCS = {
     "Store with set_secrets({secrets:[{key,value}]}); read at runtime as secrets.KEY inside a code block. list_secrets never returns values.",
   schedules:
     "create_schedule with an RFC 5545 recurrenceRule (e.g. 'FREQ=DAILY;BYHOUR=9'), evaluated in UTC. Run input comes from a linked project resource (inputResourceName). Only create/enable schedules after the workflow is `active` and the user has signed off.",
+  resources:
+    "The PAT API is the environment control plane for project data resources; project files are separate. source controls behavior: manual is operator-managed, api may refresh from config.url, and workflow may be written by running code, so automatic API/workflow writes can later overwrite values set here. Prefer stable resourceId for get/update/delete. Name + lifecycle is a bounded convenience lookup and can race concurrent changes; name alone works only when unique across lifecycles. test_resource_api fetches and parses a URL without persisting a resource.",
   lifecycle: {
     policy:
       "Agents MUST follow this rollout ladder. Never skip steps or promote to `active` without explicit user approval.",
@@ -549,7 +574,7 @@ const DOCS = {
     },
   ],
 };
-const DOCS_TOPICS = ["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "lifecycle", "examples"] as const;
+const DOCS_TOPICS = ["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "resources", "lifecycle", "examples"] as const;
 
 const DefinitionInput = z
   .record(z.string(), z.unknown())
@@ -598,6 +623,7 @@ const limit = z.number().int().min(1).max(100).describe("Page size (default 25, 
 const cursor = z.string().describe("Pagination cursor from a previous response's nextCursor.").optional();
 
 const RO = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const EXTERNAL_READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const CREATE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const UPSERT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const REMOVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
@@ -718,9 +744,14 @@ const encodeFilterCursor = (value: FilterCursor) =>
 const mapResource = (resource: any) => ({
   resourceId: resource.id,
   name: resource.name,
+  kind: "data",
   description: resource.description ?? null,
   value: resource.value,
+  source: resource.source,
+  config: resource.source === "api" ? (resource.config ?? null) : null,
   lifecycle: resource.lifecycle ?? null,
+  lastFetchedAt: resource.lastFetchedAt ?? null,
+  createdAt: resource.createdAt,
   updatedAt: resource.updatedAt,
 });
 
@@ -822,7 +853,7 @@ const baseHandler = createMcpHandler(
       {
         title: "List projects",
         description:
-          "Lists the projects this token can access (id + name), for picking a set_project target. Allowlist-scoped tokens see only their allowlisted projects. Returns: { items: [{ projectId, name }], nextCursor }.",
+          "Lists projects this token can access and bounded project-selection guidance. Allowlist-scoped tokens see only their allowlisted projects. Returns the existing { items, nextCursor } fields plus projectSelection with explicit-selector, connector-scope, and token-scope guidance.",
         inputSchema: { limit, cursor },
         annotations: RO,
       },
@@ -831,7 +862,11 @@ const baseHandler = createMcpHandler(
           const page = toPage(cur);
           const r = await api("GET", "/api/agent/projects", { query: { page, pageSize: lim ?? 25 } });
           const items = (r.projects ?? []).map((p: any) => ({ projectId: p.id, name: p.name }));
-          return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
+          return result({
+            items,
+            nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page),
+            projectSelection: PROJECT_SELECTION_GUIDANCE,
+          });
         } catch (e) {
           return fail(e);
         }
@@ -843,7 +878,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Set project",
         description:
-          "Remembers the target Studio project for later calls from this token (no need to call this if you always pass project_id/x-project-id explicitly, which is the recommended pattern for one-shot/stateless callers). If multiple separate connectors share one PAT, add a stable connection_id query param or x-connection-id header to isolate their selections from each other; without one, the selection is shared by every caller of this token. An explicit project_id query or x-project-id header always takes precedence over this. Validates access before storing. Returns: { projectId, validated: true }.",
+          "Remembers the target Studio project after validating access. Precedence is project_id query → x-project-id header → remembered set_project → STUDIO_DEFAULT_PROJECT_ID. With connection_id, x-connection-id, or a client-supplied mcp-session-id, memory is isolated to this PAT + connector. Only when no connector identity exists, compatibility memory is PAT-wide and shared by every caller using that PAT. Explicit selectors are safest. Returns the existing fields plus selectionScope:'connector'|'token'; token scope also returns a warning.",
         inputSchema: {
           projectId: z.string().uuid().describe("The Studio project UUID — discover it with list_projects."),
         },
@@ -879,7 +914,13 @@ const baseHandler = createMcpHandler(
             );
           }
           await rememberProject(projectId);
-          return result({ projectId, validated: true });
+          const selectionScope = callerConnection.getStore() ? "connector" : "token";
+          return result({
+            projectId,
+            validated: true,
+            selectionScope,
+            ...(selectionScope === "token" ? { warning: TOKEN_SELECTION_WARNING } : {}),
+          });
         } catch (e) {
           return fail(e);
         }
@@ -906,12 +947,9 @@ const baseHandler = createMcpHandler(
       {
         title: "Get authoring docs",
         description:
-          "How to author Automat workflows: code-node globals ($('NodeName'), fetch, secrets), async/return semantics, node types, browser/recording, schedules, and worked examples. CALL THIS FIRST when building or editing a workflow. Pass `topic` to return just one section.",
+          "How to author Automat workflows: code-node globals ($('NodeName'), fetch, secrets), async/return semantics, node types, browser/recording, schedules, resources, and worked examples. CALL THIS FIRST when building or editing a workflow. Pass `topic` to return just one section.",
         inputSchema: {
-          topic: z
-            .enum(["overview", "codeNodes", "nodeTypes", "browser", "secrets", "schedules", "lifecycle", "examples"])
-            .describe("Optional: return only this section.")
-            .optional(),
+          topic: z.enum(DOCS_TOPICS).describe("Optional: return only this section.").optional(),
         },
         annotations: RO,
       },
@@ -1773,7 +1811,7 @@ const baseHandler = createMcpHandler(
       {
         title: "List resources",
         description:
-          "Lists project data resources by stable resourceId, name, and metadata. Search uses bounded complete-page scanning and reports truncation. Returns: { items: [{ resourceId, name, kind, description, lifecycle, updatedAt }], nextCursor, truncated? }.",
+          "Lists project data resources in the PAT environment control plane. Data resources only; project files are separate. API/workflow sources may overwrite values automatically. Search uses bounded complete-page scanning. Returns the normalized full resource shape; prefer resourceId for later mutations.",
         inputSchema: { lifecycle: Lifecycle.optional(), search: z.string().optional(), limit, cursor },
         annotations: RO,
       },
@@ -1787,28 +1825,14 @@ const baseHandler = createMcpHandler(
               cursor: cur,
             });
             return result({
-              items: filtered.items.map((x: any) => ({
-                resourceId: x.id,
-                name: x.name,
-                kind: "data",
-                description: x.description ?? null,
-                lifecycle: x.lifecycle ?? null,
-                updatedAt: x.updatedAt,
-              })),
+              items: filtered.items.map(mapResource),
               nextCursor: filtered.nextCursor,
               truncated: filtered.truncated,
             });
           }
           const page = toPage(cur);
           const r = await api("GET", "/api/agent/resources", { query: { lifecycle, page, pageSize: lim ?? 25 } });
-          const items = (r.resources ?? []).map((x: any) => ({
-            resourceId: x.id,
-            name: x.name,
-            kind: "data",
-            description: x.description ?? null,
-            lifecycle: x.lifecycle ?? null,
-            updatedAt: x.updatedAt,
-          }));
+          const items = (r.resources ?? []).map(mapResource);
           return result({ items, nextCursor: nextCursor(r.currentPage ?? page, r.totalPages ?? page) });
         } catch (e) {
           return fail(e);
@@ -1821,7 +1845,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Get resource",
         description:
-          "Returns one project data resource by canonical resourceId or name. lifecycle disambiguates names that exist in multiple stages; an ambiguous name-only lookup returns conflict.",
+          "Returns one normalized project data resource. Data resources only; files are separate. Prefer resourceId. Name + lifecycle is a bounded convenience lookup that can race concurrent changes; ambiguous name-only lookup conflicts.",
         inputSchema: ResourceIdentifierInput,
         annotations: RO,
       },
@@ -1838,10 +1862,7 @@ const baseHandler = createMcpHandler(
               `No resource matched ${resourceId ?? (lifecycle ? `${name}/${lifecycle}` : name)}.`,
             );
           }
-          return result({
-            ...mapResource(x),
-            kind: "data",
-          });
+          return result(mapResource(x));
         } catch (e) {
           return fail(e);
         }
@@ -1853,21 +1874,29 @@ const baseHandler = createMcpHandler(
       {
         title: "Set resource",
         description:
-          "Creates or updates data resources. resourceId updates one row; name + lifecycle upserts one stage. Name-only updates a unique existing row, conflicts on multiple lifecycle rows, or creates all stages when absent. Every returned row normalizes Studio id to resourceId.",
+          "Creates or updates project data resources through the PAT environment control plane. source defaults to manual on create; api requires config and workflow/api values may later be overwritten automatically. Prefer resourceId. Name/lifecycle upsert remains a bounded, potentially racy convenience. Updates never move lifecycle.",
         inputSchema: {
           resourceId: z.string().uuid().optional(),
           name: z.string().min(1).optional(),
           value: z.unknown(),
-          description: z.string().optional(),
+          description: z.string().max(500).nullable().optional(),
           lifecycle: Lifecycle.optional(),
+          source: ResourceSource.optional(),
+          config: ResourceApiConfig.optional(),
         },
         annotations: UPSERT,
       },
-      async ({ resourceId, name, value, description, lifecycle }) => {
+      async ({ resourceId, name, value, description, lifecycle, source, config }) => {
         try {
+          const updateBody = {
+            value,
+            ...(description !== undefined ? { description } : {}),
+            ...(source !== undefined ? { source } : {}),
+            ...(config !== undefined ? { config } : {}),
+          };
           if (resourceId) {
             const updated = await api("PUT", `/api/agent/resources/${resourceId}`, {
-              body: { value, description },
+              body: updateBody,
             });
             return result({ resource: expectResource(updated) });
           }
@@ -1876,7 +1905,7 @@ const baseHandler = createMcpHandler(
             const existing = await findResource(name, lifecycle);
             if (existing) {
               const updated = await api("PUT", `/api/agent/resources/${existing.id}`, {
-                body: { value, description },
+                body: updateBody,
               });
               return result({ resource: expectResource(updated) });
             }
@@ -1890,13 +1919,20 @@ const baseHandler = createMcpHandler(
             }
             if (existing.length === 1) {
               const updated = await api("PUT", `/api/agent/resources/${existing[0].id}`, {
-                body: { value, description },
+                body: updateBody,
               });
               return result({ resource: expectResource(updated) });
             }
           }
           const created = await api("POST", "/api/agent/resources", {
-            body: { name, value, description, lifecycle },
+            body: {
+              name,
+              value,
+              source: source ?? "manual",
+              ...(description !== undefined ? { description } : {}),
+              ...(lifecycle !== undefined ? { lifecycle } : {}),
+              ...(config !== undefined ? { config } : {}),
+            },
           });
           return result({ resources: expectResources(created) });
         } catch (e) {
@@ -1910,7 +1946,7 @@ const baseHandler = createMcpHandler(
       {
         title: "Delete resource",
         description:
-          "Deletes one project data resource by canonical resourceId or name. lifecycle disambiguates names that exist in multiple stages; an ambiguous name-only lookup returns conflict.",
+          "Deletes one manual, API, or workflow project data resource. Data resources only; files are separate. Prefer resourceId. Name + lifecycle is a bounded, potentially racy convenience lookup; ambiguous name-only lookup conflicts.",
         inputSchema: ResourceIdentifierInput,
         annotations: REMOVE,
       },
@@ -1929,7 +1965,26 @@ const baseHandler = createMcpHandler(
       },
     );
 
-    // ---- Extractors (not in v1 API yet) ----
+    server.registerTool(
+      "test_resource_api",
+      {
+        title: "Test resource API",
+        description:
+          "Fetches and parses an external API URL using Studio's resource fetch rules. Read-only and does not persist or modify a resource. Returns: { value }.",
+        inputSchema: { url: z.string().url() },
+        annotations: EXTERNAL_READ,
+      },
+      async ({ url }) => {
+        try {
+          const response = await api("POST", "/api/agent/resources/test-fetch", { body: { url } });
+          return result({ value: response.value });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    // ---- Extractors ----
     server.registerTool(
       "list_extractors",
       {
@@ -1973,7 +2028,7 @@ const baseHandler = createMcpHandler(
   {
     serverInfo: { name: "automat-robotic-workflows", version: packageJson.version },
     instructions:
-      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST: for a one-shot/stateless caller, always pass ?project_id=<uuid> or an x-project-id header on every call (STUDIO_DEFAULT_PROJECT_ID also works) — that is simpler and takes precedence over anything else. For a caller that keeps calling this same connector repeatedly, list_projects to discover ids, then set_project once (add a connection_id query param / x-connection-id header first if multiple separate connectors share this one PAT, so their selections don't collide). Token tiers: read tokens can list/inspect (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule/secret/resource mutations need authorship (author role + write token).\n\n" +
+      "Build, run, and manage Automat RPA workflows in one project. Authenticate with a Studio personal access token (pat_…). Select the target project FIRST. Precedence is project_id query → x-project-id header → remembered set_project → STUDIO_DEFAULT_PROJECT_ID. Explicit project_id/x-project-id is safest. Remembered selection is isolated by PAT + logical connector when connection_id, x-connection-id, or a client-supplied mcp-session-id is present. Only connector-less callers use the compatibility PAT-wide bucket, so all bare callers sharing that PAT share one remembered selection; give each bare connector a unique PAT to prevent collisions. Token tiers: read tokens can list/inspect most domains (but not read definition JSON — read_workflow 'full'/'node' need an authorship-tier PAT; 'graph' always works); write tokens can also run workflows, stop sessions, and complete HITL tasks; workflow/schedule mutations need authorship; list_versions, list_secrets, secret set/delete, and every resource control-plane operation (list, get, test, create, update, delete) need authorship (author role + write token).\n\n" +
       "Build loop: call get_docs FIRST to learn how to write nodes (code-block globals, $('NodeName'), fetch, examples), get_workflow_schema for the exact JSON shape, read_workflow(view:'graph') to see the current graph, then edit: edit_node_code for surgical find/replace inside one node's code (preferred for code changes — no resending big strings), edit_workflow with a small patch for structural changes (both validate and save a version; fix any returned error and retry). Run with run_workflow and inspect with get_run(include:['timeline','io']).\n\n" +
       "Lifecycle policy (REQUIRED): development while the agent iterates (default for new workflows; use dryRun:true only when the workflow explicitly implements that convention, because the platform does not suppress arbitrary side effects) → preview ONLY when ready for the human to test → active ONLY after explicit user go-live approval. Never skip to active on your own. get_docs topic:'lifecycle' has the full ladder.\n\n" +
       "Model: each edit saves an immutable version; lifecycle is development → preview → active → disabled (update_workflow; activating needs a published version). Schedules use RFC 5545 rules (UTC) and a linked project resource for input. Secrets are write-only. document nodes reference an extractorId (list_extractors).",

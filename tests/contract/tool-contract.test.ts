@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetMemFallbackForTests,
@@ -152,12 +156,19 @@ const toolClassifications = {
       "DELETE /api/v1/projects/{projectId}/resources/{resourceId}",
     ],
   },
+  test_resource_api: {
+    kind: "studio",
+    operations: ["POST /api/v1/projects/{projectId}/resources/test-fetch"],
+  },
   list_extractors: { kind: "studio", operations: ["GET /api/v1/projects/{projectId}/extractors"] },
   get_extractor: {
     kind: "studio",
     operations: ["GET /api/v1/projects/{projectId}/extractors/{extractorId}"],
   },
 } as const satisfies Record<string, ToolClassification>;
+
+const TOKEN_SELECTION_WARNING =
+  "All callers sharing this PAT also share this remembered project. Prefer explicit project_id/x-project-id, a stable connection_id, or a unique PAT per bare connector.";
 
 function createRedisFixture() {
   const values = new Map<string, string>();
@@ -183,6 +194,59 @@ afterEach(() => {
   __resetRedisForTests();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+describe("Studio error mapping", () => {
+  it("preserves generated stable error codes from Studio's code field", async () => {
+    const fixture = createStudioFetchFixture(() =>
+      jsonResponse(
+        { error: "Conflict", code: "resource_conflict", message: "The resource changed concurrently" },
+        { status: 409 },
+      ),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      const response = parseTextResult(
+        await client.callTool({
+          name: "get_resource",
+          arguments: { resourceId: "11111111-1111-4111-8111-111111111112" },
+        }),
+      ) as { error: { code: string; message: string } };
+
+      expect(response.error).toEqual({
+        code: "resource_conflict",
+        status: 409,
+        message: "The resource changed concurrently",
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("preserves stable codes but sanitizes Studio 5xx messages", async () => {
+    const fixture = createStudioFetchFixture(() =>
+      jsonResponse(
+        { error: "Fetch failed", code: "resource_fetch_timeout", message: "private upstream detail" },
+        { status: 502 },
+      ),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      const response = parseTextResult(
+        await client.callTool({ name: "test_resource_api", arguments: { url: "https://example.com/data.json" } }),
+      ) as { error: { code: string; message: string } };
+
+      expect(response.error).toEqual({
+        code: "resource_fetch_timeout",
+        status: 502,
+        message: "Studio request failed.",
+      });
+    } finally {
+      await client.close();
+    }
+  });
 });
 
 describe("registered tool contract", () => {
@@ -225,6 +289,7 @@ describe("registered tool contract", () => {
           "get_resource",
           "set_resource",
           "delete_resource",
+          "test_resource_api",
           "list_extractors",
           "get_extractor",
         ]
@@ -251,10 +316,35 @@ describe("registered tool contract", () => {
     }
   });
 
+  it("exposes resource guidance and external-read metadata", async () => {
+    const { client } = await connectTestClient();
+    try {
+      const docs = parseTextResult(
+        await client.callTool({
+          name: "get_docs",
+          arguments: { topic: "resources" },
+        }),
+      );
+      expect(docs).toEqual({
+        resources: expect.stringContaining("environment control plane"),
+      });
+
+      const testResourceApi = (await client.listTools()).tools.find((tool) => tool.name === "test_resource_api");
+      expect(testResourceApi?.annotations).toEqual({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it("keeps every classified Studio operation in the synchronized contract projection", () => {
     expect(studioContractProjection.contractId).toMatch(/^[a-z][a-z0-9-]*$/);
     expect(Number.isInteger(studioContractProjection.revision)).toBe(true);
-    expect(studioContractProjection.revision).toBeGreaterThan(0);
+    expect(studioContractProjection.revision).toBe(2);
 
     const operationIds = studioContractProjection.operations.map((operation) => operation.operationId);
     const operationKeys = studioContractProjection.operations.map(
@@ -264,12 +354,262 @@ describe("registered tool contract", () => {
     expect(new Set(operationKeys).size).toBe(operationKeys.length);
 
     const projected = new Set(operationKeys);
+    for (const operation of studioContractProjection.operations) {
+      expect(["none", "body", "query"], `${operation.operationId} requestLocation`).toContain(
+        operation.requestLocation,
+      );
+      expect(["read", "write", "authorship"], `${operation.operationId} wrapperTier`).toContain(operation.wrapperTier);
+      expect(operation.successStatus, `${operation.operationId} successStatus`).toBeGreaterThanOrEqual(100);
+      expect(operation.successStatus, `${operation.operationId} successStatus`).toBeLessThan(600);
+      expect(Array.isArray(operation.stableErrorCodes), `${operation.operationId} stableErrorCodes`).toBe(true);
+      expect(new Set(operation.stableErrorCodes).size).toBe(operation.stableErrorCodes.length);
+      if (operation.pagination !== null) {
+        expect(operation.requestLocation, `${operation.operationId} pagination location`).toBe("query");
+        expect(operation.pagination.style, `${operation.operationId} pagination style`).toBe("page_page_size");
+      }
+      expect(operation.requestSchema === null || typeof operation.requestSchema === "object").toBe(true);
+      expect(
+        operation.querySchema === null || typeof operation.querySchema === "object",
+        `${operation.operationId} querySchema`,
+      ).toBe(true);
+      if (operation.effectiveTier !== null) {
+        expect(operation.effectiveTier).toMatchObject({
+          tier: expect.stringMatching(/^(read|write|authorship)$/),
+          when: expect.any(String),
+        });
+      }
+    }
+
     for (const [tool, classification] of Object.entries(toolClassifications)) {
       if (classification.kind === "local") continue;
       for (const operation of classification.operations) {
         expect(projected.has(operation), `${tool} classified operation ${operation}`).toBe(true);
       }
     }
+
+    const byId = new Map(studioContractProjection.operations.map((operation) => [operation.operationId, operation]));
+    expect(byId.get("projects.list")).toMatchObject({
+      requestLocation: "query",
+      wrapperTier: "read",
+      successStatus: 200,
+      pagination: { request: { maxPageSize: 100 }, response: { items: "projects" } },
+    });
+    expect(byId.get("workflows.list")).toMatchObject({
+      requestLocation: "query",
+      wrapperTier: "read",
+      querySchema: {
+        properties: {
+          status: { enum: ["development", "preview", "active", "disabled"] },
+          search: { type: "string" },
+        },
+      },
+      pagination: { response: { items: "workflows" } },
+    });
+    expect(byId.get("workflows.create")).toMatchObject({
+      requestLocation: "body",
+      wrapperTier: "authorship",
+      successStatus: 201,
+      pagination: null,
+    });
+    expect(byId.get("workflows.get")).toMatchObject({
+      wrapperTier: "read",
+      effectiveTier: { tier: "authorship", when: expect.stringContaining("definition JSON") },
+    });
+    expect(byId.get("sessions.get_logs")).toMatchObject({
+      wrapperTier: "read",
+      successStatus: 404,
+    });
+    expect(byId.get("workflows.run")).toMatchObject({
+      requestLocation: "body",
+      wrapperTier: "write",
+      successStatus: 202,
+      pagination: null,
+      stableErrorCodes: ["workflow_not_found"],
+    });
+    expect(byId.get("resources.list")).toMatchObject({ wrapperTier: "authorship" });
+    expect(byId.get("resources.get")).toMatchObject({ wrapperTier: "authorship" });
+    expect(byId.get("resources.create")).toMatchObject({
+      wrapperTier: "authorship",
+      requestSchema: { oneOf: expect.arrayContaining([expect.objectContaining({ additionalProperties: false })]) },
+      stableErrorCodes: ["resource_conflict", "resource_invalid_config"],
+    });
+    expect(byId.get("resources.put")).toMatchObject({
+      wrapperTier: "authorship",
+      requestSchema: {
+        required: ["value"],
+        properties: {
+          source: { enum: ["manual", "api", "workflow"] },
+          config: { required: ["url"], additionalProperties: false },
+        },
+        additionalProperties: false,
+      },
+      stableErrorCodes: [
+        "resource_conflict",
+        "resource_invalid_config",
+        "resource_not_found",
+        "resource_source_conflict",
+      ],
+    });
+    expect(byId.get("resources.test_fetch")).toMatchObject({
+      method: "POST",
+      path: "/api/v1/projects/{projectId}/resources/test-fetch",
+      wrapperTier: "authorship",
+      requestSchema: { required: ["url"] },
+      stableErrorCodes: expect.arrayContaining(["resource_fetch_timeout", "resource_fetch_invalid_json"]),
+    });
+    expect(byId.get("versions.list")).toMatchObject({ wrapperTier: "authorship" });
+    expect(byId.get("versions.get")).toMatchObject({
+      wrapperTier: "read",
+      effectiveTier: { tier: "authorship" },
+    });
+    expect(byId.get("secrets.list_names")).toMatchObject({ wrapperTier: "authorship" });
+    expect(byId.get("extractors.list")).toMatchObject({ wrapperTier: "read" });
+  });
+
+  it("projects a representative upstream Studio contract deterministically", () => {
+    const directory = mkdtempSync(join(tmpdir(), "automat-mcp-contract-"));
+    const upstreamSource = join(process.cwd(), "tests/fixtures/studio-programmatic-access-contract.json");
+    const reversedSource = join(directory, "reversed.json");
+    const script = join(process.cwd(), "scripts/sync-studio-contract.mjs");
+    try {
+      const upstream = JSON.parse(readFileSync(upstreamSource, "utf8"));
+      writeFileSync(
+        reversedSource,
+        JSON.stringify({
+          ...upstream,
+          operations: [...upstream.operations].reverse(),
+        }),
+      );
+
+      const first = execFileSync(process.execPath, [script, "--stdout", upstreamSource], {
+        encoding: "utf8",
+      });
+      const second = execFileSync(process.execPath, [script, "--stdout", reversedSource], {
+        encoding: "utf8",
+      });
+
+      expect(second).toBe(first);
+      expect(`${JSON.stringify(JSON.parse(first), null, 2)}\n`).toBe(first);
+      expect(JSON.parse(first)).toEqual({
+        contractId: "representative-studio-programmatic-access",
+        revision: 7,
+        operations: [
+          {
+            operationId: "projects.list",
+            method: "GET",
+            path: "/api/v1/projects",
+            requestLocation: "query",
+            requestSchema: null,
+            querySchema: null,
+            wrapperTier: "read",
+            effectiveTier: null,
+            successStatus: 200,
+            pagination: expect.objectContaining({
+              style: "page_page_size",
+              request: expect.objectContaining({ maxPageSize: 100 }),
+            }),
+            stableErrorCodes: [],
+          },
+          {
+            operationId: "workflows.create",
+            method: "POST",
+            path: "/api/v1/projects/{projectId}/workflows",
+            requestLocation: "body",
+            requestSchema: {
+              properties: {
+                definition: {
+                  type: "object",
+                },
+              },
+              required: ["definition"],
+              type: "object",
+            },
+            querySchema: null,
+            wrapperTier: "authorship",
+            effectiveTier: null,
+            successStatus: 201,
+            pagination: null,
+            stableErrorCodes: ["workflow_name_conflict"],
+          },
+          {
+            operationId: "workflows.get",
+            method: "GET",
+            path: "/api/v1/projects/{projectId}/workflows/{workflowId}",
+            requestLocation: "query",
+            requestSchema: null,
+            querySchema: {
+              properties: {
+                view: {
+                  enum: ["meta", "full", "graph", "node"],
+                  type: "string",
+                },
+              },
+              type: "object",
+            },
+            wrapperTier: "read",
+            effectiveTier: {
+              tier: "authorship",
+              when: "the response includes definition JSON",
+            },
+            successStatus: 200,
+            pagination: null,
+            stableErrorCodes: ["workflow_not_found"],
+          },
+        ],
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["requestLocation", "querySchema", "wrapperTier", "successStatus", "pagination", "stableErrorCodes"])(
+    "rejects an upstream operation missing required %s metadata",
+    (field) => {
+      const directory = mkdtempSync(join(tmpdir(), "automat-mcp-contract-invalid-"));
+      const sourcePath = join(directory, "missing-field.json");
+      const script = join(process.cwd(), "scripts/sync-studio-contract.mjs");
+      try {
+        const upstream = JSON.parse(
+          readFileSync(join(process.cwd(), "tests/fixtures/studio-programmatic-access-contract.json"), "utf8"),
+        );
+        delete upstream.operations[0][field];
+        writeFileSync(sourcePath, JSON.stringify(upstream));
+
+        expect(() =>
+          execFileSync(process.execPath, [script, "--stdout", sourcePath], {
+            encoding: "utf8",
+            stdio: "pipe",
+          }),
+        ).toThrow();
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("keeps project-selection docs and rules aligned without a server-issued session claim", () => {
+    const files = ["AGENTS.md", ".cursor/BUGBOT.md", ".cursor/rules/mcp-contract.md", "README.md", "RUBRIC.md"];
+    const contents = files.map((file) => [file, readFileSync(join(process.cwd(), file), "utf8")] as const);
+
+    for (const [file, content] of contents) {
+      expect(content, `${file} explicit selector precedence`).toMatch(
+        /project_id[\s\S]*x-project-id[\s\S]*(remembered )?`?set_project`?/i,
+      );
+      expect(content, `${file} token compatibility scope`).toMatch(/PAT-global|PAT-wide|token-only/i);
+      expect(content, `${file} no server-issued mcp-session-id claim`).not.toMatch(
+        /server[- ]issued[^.\n]*mcp-session-id|mcp-session-id[^.\n]*server[- ]issued/i,
+      );
+    }
+  });
+
+  it("keeps local Vercel startup outside the recursive framework dev script", () => {
+    const packageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
+    const readme = readFileSync(join(process.cwd(), "README.md"), "utf8");
+
+    expect(packageJson.scripts.dev).toBeUndefined();
+    expect(packageJson.scripts["dev:local"]).toBe("vercel dev");
+    expect(readme).toContain("pnpm run dev:local");
+    expect(readme).not.toContain("pnpm run dev          # vercel dev");
   });
 
   it("verifies recorded fixture requests against declared operations for a representative sample of tools", async () => {
@@ -697,9 +1037,13 @@ describe("registered tool contract", () => {
     ]);
 
     try {
-      await Promise.all([
+      const selections = await Promise.all([
         clientA.callTool({ name: "set_project", arguments: { projectId: projectA } }),
         clientB.callTool({ name: "set_project", arguments: { projectId: projectB } }),
+      ]);
+      expect(selections.map(parseTextResult)).toEqual([
+        { projectId: projectA, validated: true, selectionScope: "connector" },
+        { projectId: projectB, validated: true, selectionScope: "connector" },
       ]);
       await Promise.all([
         clientB.callTool({ name: "list_workflows", arguments: {} }),
@@ -733,6 +1077,8 @@ describe("registered tool contract", () => {
       expect(parseTextResult(await client.callTool({ name: "set_project", arguments: { projectId } }))).toEqual({
         projectId,
         validated: true,
+        selectionScope: "token",
+        warning: TOKEN_SELECTION_WARNING,
       });
 
       await client.callTool({ name: "list_workflows", arguments: {} });
@@ -740,6 +1086,78 @@ describe("registered tool contract", () => {
       expect(workflowRequest?.url.pathname).toBe(`/api/v1/projects/${projectId}/workflows`);
     } finally {
       await client.close();
+    }
+  });
+
+  it("characterizes last-writer-wins selection for bare callers sharing one PAT", async () => {
+    const projectA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const projectB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const fixture = createStudioFetchFixture((request) =>
+      request.url.pathname === "/api/v1/projects"
+        ? jsonResponse({
+            projects: [
+              { id: projectA, name: "A" },
+              { id: projectB, name: "B" },
+            ],
+            currentPage: 1,
+            totalPages: 1,
+          })
+        : jsonResponse({ workflows: [], currentPage: 1, totalPages: 1 }),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client: first } = await connectTestClient({ projectId: null, apiKey: "pat_shared" });
+    const { client: second } = await connectTestClient({ projectId: null, apiKey: "pat_shared" });
+    try {
+      await first.callTool({ name: "set_project", arguments: { projectId: projectA } });
+      expect(
+        parseTextResult(await second.callTool({ name: "set_project", arguments: { projectId: projectB } })),
+      ).toEqual({
+        projectId: projectB,
+        validated: true,
+        selectionScope: "token",
+        warning: TOKEN_SELECTION_WARNING,
+      });
+
+      await first.callTool({ name: "list_workflows", arguments: {} });
+      expect(fixture.requests.at(-1)?.url.pathname).toBe(`/api/v1/projects/${projectB}/workflows`);
+    } finally {
+      await Promise.all([first.close(), second.close()]);
+    }
+  });
+
+  it("isolates connector-less remembered selections across unique PATs", async () => {
+    const projectA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const projectB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const fixture = createStudioFetchFixture((request) =>
+      request.url.pathname === "/api/v1/projects"
+        ? jsonResponse({
+            projects: [
+              { id: projectA, name: "A" },
+              { id: projectB, name: "B" },
+            ],
+            currentPage: 1,
+            totalPages: 1,
+          })
+        : jsonResponse({ workflows: [], currentPage: 1, totalPages: 1 }),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client: clientA } = await connectTestClient({ projectId: null, apiKey: "pat_unique_a" });
+    const { client: clientB } = await connectTestClient({ projectId: null, apiKey: "pat_unique_b" });
+    try {
+      await clientA.callTool({ name: "set_project", arguments: { projectId: projectA } });
+      await clientB.callTool({ name: "set_project", arguments: { projectId: projectB } });
+      await clientA.callTool({ name: "list_workflows", arguments: {} });
+      await clientB.callTool({ name: "list_workflows", arguments: {} });
+
+      const workflowPaths = fixture.requests
+        .filter((request) => request.url.pathname.endsWith("/workflows"))
+        .map((request) => request.url.pathname);
+      expect(workflowPaths).toEqual([
+        `/api/v1/projects/${projectA}/workflows`,
+        `/api/v1/projects/${projectB}/workflows`,
+      ]);
+    } finally {
+      await Promise.all([clientA.close(), clientB.close()]);
     }
   });
 
@@ -960,7 +1378,7 @@ describe("registered tool contract", () => {
           arguments: { projectId: selectedProject },
         }),
       ),
-    ).toEqual({ projectId: selectedProject, validated: true });
+    ).toEqual({ projectId: selectedProject, validated: true, selectionScope: "connector" });
     await setter.close();
 
     const { client: selectedClient } = await connectTestClient({
@@ -1017,7 +1435,7 @@ describe("registered tool contract", () => {
           arguments: { projectId: selectedProject },
         }),
       ),
-    ).toEqual({ projectId: selectedProject, validated: true });
+    ).toEqual({ projectId: selectedProject, validated: true, selectionScope: "connector" });
     await setter.close();
     expect(redisFixture.set).toHaveBeenCalledOnce();
 
@@ -1409,6 +1827,172 @@ describe("registered tool contract", () => {
     }
   });
 
+  it("maps manual, API, and workflow resource writes to the revision-2 contract", async () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const apiId = "22222222-2222-4222-8222-222222222222";
+    const workflowId = "33333333-3333-4333-8333-333333333333";
+    const fixture = createStudioFetchFixture((request) => {
+      if (request.method === "GET") {
+        return jsonResponse({ resources: [], currentPage: 1, totalPages: 1 });
+      }
+      if (request.method === "DELETE") return jsonResponse({ success: true });
+      const body = request.body as Record<string, unknown>;
+      const source = (body.source as string | undefined) ?? "manual";
+      const id = source === "workflow" ? workflowId : apiId;
+      const resource = {
+        id,
+        name: source === "api" ? "exchange-rates" : "workflow-cache",
+        description: body.description ?? null,
+        value: body.value,
+        source,
+        config: source === "api" ? body.config : null,
+        lifecycle: "development",
+        lastFetchedAt: source === "api" ? "2026-07-24T10:00:00Z" : null,
+        createdAt: "2026-07-24T09:00:00Z",
+        updatedAt: "2026-07-24T10:00:00Z",
+      };
+      return jsonResponse(request.method === "POST" ? { resources: [resource] } : { resource }, {
+        status: request.method === "POST" ? 201 : 200,
+      });
+    });
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient({ projectId });
+    try {
+      await client.callTool({
+        name: "set_resource",
+        arguments: { name: "legacy-manual", value: { enabled: true } },
+      });
+      expect(fixture.requests[1]?.body).toEqual({
+        name: "legacy-manual",
+        value: { enabled: true },
+        source: "manual",
+      });
+
+      const apiResult = parseTextResult(
+        await client.callTool({
+          name: "set_resource",
+          arguments: {
+            name: "exchange-rates",
+            lifecycle: "development",
+            value: { USD: 1 },
+            source: "api",
+            config: { url: "https://example.com/rates", schedule: "0 * * * *" },
+            description: "Hourly rates",
+          },
+        }),
+      );
+      expect(fixture.requests[3]?.body).toEqual({
+        name: "exchange-rates",
+        value: { USD: 1 },
+        source: "api",
+        config: { url: "https://example.com/rates", schedule: "0 * * * *" },
+        description: "Hourly rates",
+        lifecycle: "development",
+      });
+      expect(apiResult).toEqual({
+        resources: [
+          {
+            resourceId: apiId,
+            name: "exchange-rates",
+            kind: "data",
+            description: "Hourly rates",
+            value: { USD: 1 },
+            source: "api",
+            config: { url: "https://example.com/rates", schedule: "0 * * * *" },
+            lifecycle: "development",
+            lastFetchedAt: "2026-07-24T10:00:00Z",
+            createdAt: "2026-07-24T09:00:00Z",
+            updatedAt: "2026-07-24T10:00:00Z",
+          },
+        ],
+      });
+
+      await client.callTool({
+        name: "set_resource",
+        arguments: {
+          resourceId: workflowId,
+          value: { cursor: 2 },
+          source: "workflow",
+          description: null,
+        },
+      });
+      expect(fixture.requests[4]?.body).toEqual({
+        value: { cursor: 2 },
+        source: "workflow",
+        description: null,
+      });
+
+      await client.callTool({ name: "delete_resource", arguments: { resourceId: apiId } });
+      expect(fixture.requests[5]).toMatchObject({ method: "DELETE" });
+      expect(fixture.requests[5]?.url.pathname).toBe(`/api/v1/projects/${projectId}/resources/${apiId}`);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("passes source/config combinations to Studio and sanitizes resource failures", async () => {
+    const leakedValue = "customer-value-must-not-leak";
+    const fixture = createStudioFetchFixture(() =>
+      jsonResponse(
+        {
+          error: "resource_invalid_config",
+          message: "Resource configuration is invalid.",
+        },
+        { status: 400 },
+      ),
+    );
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient();
+    try {
+      const response = parseTextResult(
+        await client.callTool({
+          name: "set_resource",
+          arguments: {
+            resourceId: "22222222-2222-4222-8222-222222222222",
+            value: leakedValue,
+            source: "manual",
+            config: { url: "https://example.com/data" },
+          },
+        }),
+      );
+      expect(fixture.requests[0]?.body).toEqual({
+        value: leakedValue,
+        source: "manual",
+        config: { url: "https://example.com/data" },
+      });
+      expect(response).toMatchObject({
+        error: { code: "resource_invalid_config", status: 400, message: "Resource configuration is invalid." },
+      });
+      expect(JSON.stringify(response)).not.toContain(leakedValue);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("tests an external resource API without persistence", async () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const fixture = createStudioFetchFixture(() => jsonResponse({ value: { ok: true } }));
+    vi.stubGlobal("fetch", fixture.fetch);
+    const { client } = await connectTestClient({ projectId });
+    try {
+      expect(
+        parseTextResult(
+          await client.callTool({
+            name: "test_resource_api",
+            arguments: { url: "https://example.com/data.json" },
+          }),
+        ),
+      ).toEqual({ value: { ok: true } });
+      expect(fixture.requests[0]).toMatchObject({
+        method: "POST",
+        body: { url: "https://example.com/data.json" },
+      });
+      expect(fixture.requests[0]?.url.pathname).toBe(`/api/v1/projects/${projectId}/resources/test-fetch`);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("fails closed when Studio returns success without the expected resource payload", async () => {
     const fixture = createStudioFetchFixture((request) => {
       if (request.method === "PUT") return jsonResponse({});
@@ -1616,7 +2200,7 @@ describe("registered tool contract", () => {
           }),
         ),
       ).toEqual({
-        error: { code: "internal_error", status: 502, message: "Pause failed" },
+        error: { code: "internal_error", status: 502, message: "Studio request failed." },
         partialResult: {
           scheduleId: "schedule-1",
           created: true,
@@ -1695,7 +2279,7 @@ describe("registered tool contract", () => {
           }),
         ),
       ).toEqual({
-        error: { code: "internal_error", status: 502, message: "Second write failed" },
+        error: { code: "internal_error", status: 502, message: "Studio request failed." },
         partialResult: {
           updated: ["FIRST"],
           attemptedKey: "SECOND",
