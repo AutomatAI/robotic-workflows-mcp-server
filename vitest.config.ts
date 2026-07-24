@@ -9,11 +9,14 @@ export default defineConfig({
       reporter: ["text", "json-summary"],
       include: ["api/**/*.ts"],
       reportsDirectory: "coverage",
+      // Ratchet-only floor: bump these up as real tests land (see
+      // AGENTS.md / repository-harness.md). Never lower them, and never set
+      // them above currently-measured coverage — that's slack, not a gate.
       thresholds: {
-        lines: 35,
-        statements: 32,
-        functions: 28,
-        branches: 17,
+        lines: 43,
+        statements: 40,
+        functions: 37,
+        branches: 27,
       },
     },
   },

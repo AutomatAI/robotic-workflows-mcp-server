@@ -13,6 +13,7 @@ alwaysApply: false
 - Keep `package.json` as the only package/server version source, and bump it forward (never regress a released `serverInfo.version`).
 - CI must run on pushes to `main` and on pull requests, install with `pnpm install --frozen-lockfile`, and execute `pnpm run verify`.
 - `pnpm run fix` must format and apply safe lint fixes; `pnpm run verify` must typecheck, lint, check formatting, and run coverage.
+- Coverage thresholds in `vitest.config.ts` are a ratchet, not a target: bump them only after real tests raise measured coverage, never above the currently-measured numbers, and never lower them.
 - Keep `.node-version`, `engines.node`, `packageManager`, and CI's Node setup compatible.
 - Every Tier 2 rule needs a matching `.claude/rules` symlink. `.claude/commands` must point to `.cursor/commands`.
 - Never add a software license or license field without an explicit owner decision.
